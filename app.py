@@ -3,7 +3,7 @@ import asyncio
 import logging
 import requests
 from datetime import datetime, timedelta
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from pymongo import MongoClient
@@ -12,6 +12,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Football Prediction Bot is running!"
+
+@app.route('/health')
+def health():
+    return "OK", 200
 
 # ---------- MongoDB ----------
 MONGO_URI = os.environ.get("MONGO_URI")
@@ -337,21 +345,32 @@ telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
+# ========== GLOBAL LOOP ==========
+loop = None
+
 # ========== WEBHOOK ROUTE ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    global loop
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        # Use the global loop
-        asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
-        return "ok", 200
+        # Use run_coroutine_threadsafe with the global loop
+        if loop is not None:
+            future = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+            # Wait for it to complete to catch any errors
+            try:
+                future.result(timeout=5)
+            except Exception as e:
+                logger.exception(f"Error processing update: {e}")
+                return "error", 500
+            return "ok", 200
+        else:
+            logger.error("Loop is None!")
+            return "error", 500
     except Exception as e:
         logger.exception("Webhook error")
         return "error", 500
-
-# ========== GLOBAL LOOP ==========
-loop = None
 
 # ========== STARTUP ==========
 def setup_webhook_and_run():
@@ -395,3 +414,13 @@ else:
         logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
     else:
         logger.warning("WEBHOOK_URL not set!")
+    
+    # Keep the loop running in background
+    import threading
+    def keep_loop():
+        try:
+            loop.run_forever()
+        except Exception as e:
+            logger.exception(f"Loop error: {e}")
+    
+    threading.Thread(target=keep_loop, daemon=True).start()

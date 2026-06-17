@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 import requests
 from datetime import datetime, timedelta
@@ -47,6 +48,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 if not TOKEN or not BOT_USERNAME or not FOOTBALL_API_KEY:
     logger.error("Missing required environment variables!")
@@ -386,32 +388,52 @@ telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 # ========== WEBHOOK ROUTE ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # Webhook ကို လက်မခံတော့ဘူး (Polling သုံးမယ်)
-    return "Webhook is disabled. Using polling mode.", 200
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, telegram_app.bot)
+        # asyncio.run() ကို သုံးပြီး process_update ကို run မယ်
+        asyncio.run(telegram_app.process_update(update))
+        return "ok", 200
+    except Exception as e:
+        logger.exception(f"Webhook error: {e}")
+        return "error", 500
 
 # ========== MAIN ==========
 if __name__ == "__main__":
-    # Polling mode ကို သုံးမယ်
+    # Local testing - polling mode
     logger.info("Starting bot in polling mode...")
     telegram_app.run_polling()
 else:
-    # Gunicorn mode - Polling ကို background thread မှာ run မယ်
-    logger.info("Running in Gunicorn mode with polling...")
+    # Gunicorn mode - webhook mode
+    logger.info("Running in Gunicorn mode with webhook...")
     
-    def run_polling():
-        # Application ကို initialize လုပ်မယ်
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(telegram_app.initialize())
-        logger.info("✅ Application initialized")
-        
-        # Polling ကို start လုပ်မယ်
-        logger.info("Starting polling...")
-        telegram_app.run_polling()
+    # **အဓိက - Application ကို initialize လုပ်ပါ**
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(telegram_app.initialize())
+    logger.info("✅ Application initialized")
+    
+    # Webhook သတ်မှတ်ပါ
+    if WEBHOOK_URL:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+                json={"url": WEBHOOK_URL}
+            )
+            logger.info(f"Webhook set: {response.json()}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}")
+    else:
+        logger.warning("WEBHOOK_URL not set!")
+    
+    # Keep the loop running
+    def keep_loop():
+        try:
+            loop.run_forever()
+        except Exception as e:
+            logger.exception(f"Loop error: {e}")
     
     import threading
-    thread = threading.Thread(target=run_polling, daemon=True)
-    thread.start()
+    threading.Thread(target=keep_loop, daemon=True).start()
     
-    logger.info("✅ Bot is running with polling mode")
+    # Flask is run by Gunicorn, so we don't need to start it here

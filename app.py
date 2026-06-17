@@ -13,6 +13,23 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# ---------- MongoDB ----------
+MONGO_URI = os.environ.get("MONGO_URI")
+if MONGO_URI:
+    try:
+        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        mongo_client.admin.command('ping')
+        db = mongo_client["football_bot"]
+        predictions_col = db["predictions"]
+        users_col = db["users"]
+        logger.info("MongoDB connected successfully")
+    except Exception as e:
+        logger.error(f"MongoDB connection failed: {e}")
+        mongo_client = None
+else:
+    logger.warning("MONGO_URI not set - running without database")
+    mongo_client = None
+
 @app.route('/')
 def home():
     return "Football Prediction Bot is running!"
@@ -21,22 +38,6 @@ def home():
 def health():
     return "OK", 200
 
-# ---------- MongoDB ----------
-MONGO_URI = os.environ.get("MONGO_URI")
-if MONGO_URI:
-    try:
-        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, tlsAllowInvalidCertificates=True)
-        db = mongo_client["football_bot"]
-        predictions_col = db["predictions"]
-        matches_col = db["matches"]
-        logger.info("MongoDB connected successfully")
-    except Exception as e:
-        logger.error(f"MongoDB connection failed: {e}")
-        mongo_client = None
-else:
-    logger.warning("MONGO_URI not set, skipping MongoDB")
-    mongo_client = None
-
 # ---------- Telegram Config ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
@@ -44,12 +45,8 @@ ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",")
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
-if not TOKEN or not BOT_USERNAME or not FOOTBALL_API_KEY:
+if not TOKEN or not BOT_USERNAME or not FOOTBALL_API_KEY or not WEBHOOK_URL:
     logger.error("Missing required environment variables!")
-    exit(1)
-
-if not WEBHOOK_URL:
-    logger.error("WEBHOOK_URL not set!")
     exit(1)
 
 BASE_URL = "https://api.football-data.org/v4"
@@ -129,26 +126,12 @@ def calculate_prediction(home_team, away_team):
     
     return {'home_win': home_win, 'draw': draw, 'away_win': away_win, 'result': result}
 
-def save_prediction_to_db(home_team, away_team, prediction, user_id):
-    if mongo_client:
-        try:
-            predictions_col.insert_one({
-                'home_team': home_team,
-                'away_team': away_team,
-                'home_win': prediction['home_win'],
-                'draw': prediction['draw'],
-                'away_win': prediction['away_win'],
-                'result': prediction['result'],
-                'user_id': user_id,
-                'created_at': datetime.now()
-            })
-            logger.info(f"Prediction saved to DB: {home_team} vs {away_team}")
-        except Exception as e:
-            logger.error(f"Failed to save prediction: {e}")
-
 # ---------- Telegram Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if mongo_client:
+        users_col.update_one({"user_id": user_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
+    
     if is_admin(user_id):
         await show_admin_menu(update, context)
     else:
@@ -159,8 +142,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔹 /today - ယနေ့ပွဲစဉ်များ\n"
             "🔹 /league [လိဂ်အမည်] - လိဂ်တစ်ခုရဲ့ ပွဲစဉ်များ\n"
             "🔹 /teams - အသင်းများစာရင်း\n"
-            "🔹 /leagues - ရရှိနိုင်သော လိဂ်များ\n"
-            "🔹 /history - သင့်ခန့်မှန်းချက်မှတ်တမ်း",
+            "🔹 /leagues - ရရှိနိုင်သော လိဂ်များ",
             parse_mode="Markdown"
         )
 
@@ -180,8 +162,16 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     prediction = calculate_prediction(home_team, away_team)
     
-    # Save to MongoDB
-    save_prediction_to_db(home_team, away_team, prediction, update.effective_user.id)
+    # Save to MongoDB if available
+    if mongo_client:
+        predictions_col.insert_one({
+            "home_team": home_team,
+            "away_team": away_team,
+            "home_win": prediction['home_win'],
+            "draw": prediction['draw'],
+            "away_win": prediction['away_win'],
+            "timestamp": datetime.now()
+        })
     
     result_text = f"⚽ **{home_team}** vs **{away_team}**\n\n"
     result_text += f"🏠 **{home_team}** အနိုင်ရနိုင်ခြေ: {prediction['home_win']}%\n"
@@ -280,39 +270,11 @@ async def leagues(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not mongo_client:
-        await update.message.reply_text("❌ MongoDB မချိတ်ဆက်ထားပါ။")
-        return
-    
-    user_id = update.effective_user.id
-    try:
-        predictions = predictions_col.find({'user_id': user_id}).sort('created_at', -1).limit(10)
-        count = predictions_col.count_documents({'user_id': user_id})
-        
-        if count == 0:
-            await update.message.reply_text("📊 သင့်ခန့်မှန်းချက်မှတ်တမ်း မရှိသေးပါ။")
-            return
-        
-        text = f"📊 **သင့်ခန့်မှန်းချက်မှတ်တမ်း** (နောက်ဆုံး ၁၀ ခု)\n\n"
-        for pred in predictions:
-            created = pred['created_at'].strftime('%Y-%m-%d %H:%M')
-            text += f"⚽ {pred['home_team']} vs {pred['away_team']}\n"
-            text += f"🏠 {pred['home_win']}% | 🤝 {pred['draw']}% | ✈️ {pred['away_win']}%\n"
-            text += f"📅 {created}\n\n"
-        
-        text += f"📌 စုစုပေါင်း ခန့်မှန်းချက်: {count} ခု"
-        await update.message.reply_text(text, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"History error: {e}")
-        await update.message.reply_text("❌ မှတ်တမ်းရယူရာတွင် အမှားရှိပါသည်။")
-
 # ---------- Admin Menu ----------
 async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("⚽ ယနေ့ပွဲစဉ်များ", callback_data="admin_today")],
         [InlineKeyboardButton("🏆 လိဂ်များ", callback_data="admin_leagues")],
-        [InlineKeyboardButton("📊 ခန့်မှန်းချက်စာရင်း", callback_data="admin_history")],
     ]
     await update.message.reply_text(
         "🤖 **Admin Panel**\n\nအောက်ပါခလုတ်များမှ ရွေးချယ်ပါ။",
@@ -333,8 +295,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await today(update, context)
     elif data == "admin_leagues":
         await leagues(update, context)
-    elif data == "admin_history":
-        await history(update, context)
 
 # ---------- Build Application ----------
 telegram_app = Application.builder().token(TOKEN).build()
@@ -345,7 +305,6 @@ telegram_app.add_handler(CommandHandler("today", today))
 telegram_app.add_handler(CommandHandler("league", league))
 telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
-telegram_app.add_handler(CommandHandler("history", history))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
 # ---------- Webhook Route ----------
@@ -354,8 +313,8 @@ def webhook():
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        # Use asyncio.create_task to run the update without needing a loop variable
-        asyncio.create_task(telegram_app.process_update(update))
+        # Use global loop for async processing
+        asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
         return "ok", 200
     except Exception as e:
         logger.exception("Webhook error")
@@ -364,10 +323,8 @@ def webhook():
 # ---------- Setup Webhook at Startup ----------
 def setup_webhook():
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(telegram_app.initialize())
-        loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
+        asyncio.run_coroutine_threadsafe(telegram_app.initialize(), loop)
+        asyncio.run_coroutine_threadsafe(telegram_app.bot.set_webhook(WEBHOOK_URL), loop)
         logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
     except Exception as e:
         logger.error(f"Webhook setup failed: {e}")
@@ -379,17 +336,31 @@ def start_flask():
 
 # ---------- Main ----------
 if __name__ == "__main__":
-    setup_webhook()
-    import threading
-    threading.Thread(target=start_flask, daemon=True).start()
+    # Create global event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    
+    # Setup webhook
+    loop.run_until_complete(telegram_app.initialize())
+    loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
+    logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+    
+    # Start Flask in background thread
+    import threading
+    threading.Thread(target=start_flask, daemon=True).start()
+    
+    # Keep loop running
     try:
         loop.run_forever()
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         loop.run_until_complete(telegram_app.shutdown())
 else:
-    # Gunicorn mode
+    # Gunicorn mode - setup webhook and keep loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     logger.info("Running in Gunicorn mode - setting up webhook...")
-    setup_webhook()
+    loop.run_until_complete(telegram_app.initialize())
+    loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
+    logger.info(f"✅ Webhook set to {WEBHOOK_URL}")

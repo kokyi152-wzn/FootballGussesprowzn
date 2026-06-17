@@ -25,7 +25,7 @@ def health():
 MONGO_URI = os.environ.get("MONGO_URI")
 if MONGO_URI:
     try:
-        # ✅ အဓိက ပြင်ဆင်ချက် - tls=True နဲ့ tlsAllowInvalidCertificates=True ထည့်ထားတယ်
+        # ပြင်ထားတဲ့ Connection – tls=True နဲ့ tlsAllowInvalidCertificates=True
         mongo_client = MongoClient(
             MONGO_URI,
             tls=True,
@@ -36,12 +36,11 @@ if MONGO_URI:
         db = mongo_client["football_bot"]
         predictions_col = db["predictions"]
         users_col = db["users"]
-        logger.info("✅ MongoDB connected successfully")
+        logger.info("✅ MongoDB connected")
     except Exception as e:
         logger.warning(f"MongoDB connection failed: {e}")
         mongo_client = None
 else:
-    logger.warning("MONGO_URI not set!")
     mongo_client = None
 
 # ---------- Telegram Config ----------

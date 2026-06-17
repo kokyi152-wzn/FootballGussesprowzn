@@ -1,9 +1,10 @@
 import os
 import asyncio
+import threading
 import logging
 import requests
 from datetime import datetime, timedelta
-from flask import Flask, request
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from pymongo import MongoClient
@@ -13,24 +14,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ---------- MongoDB ----------
-MONGO_URI = os.environ.get("MONGO_URI")
-if MONGO_URI:
-    try:
-        # SSL error ကိုရှောင်ဖို့ tlsAllowInvalidCertificates=True ထည့်ပါ
-        mongo_client = MongoClient(MONGO_URI, tlsAllowInvalidCertificates=True, serverSelectionTimeoutMS=5000)
-        mongo_client.admin.command('ping')
-        db = mongo_client["football_bot"]
-        predictions_col = db["predictions"]
-        users_col = db["users"]
-        logger.info("MongoDB connected successfully")
-    except Exception as e:
-        logger.warning(f"MongoDB connection failed: {e}")
-        mongo_client = None
-else:
-    logger.warning("MONGO_URI not set - running without database")
-    mongo_client = None
-
 @app.route('/')
 def home():
     return "Football Prediction Bot is running!"
@@ -39,20 +22,31 @@ def home():
 def health():
     return "OK", 200
 
+# ---------- MongoDB ----------
+MONGO_URI = os.environ.get("MONGO_URI")
+if MONGO_URI:
+    try:
+        mongo_client = MongoClient(MONGO_URI, tlsAllowInvalidCertificates=True, serverSelectionTimeoutMS=5000)
+        mongo_client.admin.command('ping')
+        db = mongo_client["football_bot"]
+        predictions_col = db["predictions"]
+        users_col = db["users"]
+        logger.info("MongoDB connected")
+    except Exception as e:
+        logger.warning(f"MongoDB connection failed: {e}")
+        mongo_client = None
+else:
+    mongo_client = None
+
 # ---------- Telegram Config ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 if not TOKEN or not BOT_USERNAME or not FOOTBALL_API_KEY:
     logger.error("Missing required environment variables!")
     exit(1)
-
-if not WEBHOOK_URL:
-    logger.warning("WEBHOOK_URL not set - running in polling mode")
-    WEBHOOK_URL = None
 
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {'X-Auth-Token': FOOTBALL_API_KEY}
@@ -131,11 +125,10 @@ def calculate_prediction(home_team, away_team):
     
     return {'home_win': home_win, 'draw': draw, 'away_win': away_win, 'result': result}
 
-# ========== TELEGRAM COMMAND HANDLERS ==========
-
+# ---------- Telegram Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Start command from user: {update.effective_user.id}")
     user_id = update.effective_user.id
+    logger.info(f"Start command from {user_id}")
     
     if mongo_client:
         users_col.update_one({"user_id": user_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
@@ -144,23 +137,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_admin_menu(update, context)
     else:
         await update.message.reply_text(
-            "⚽ **ဘောလုံးခန့်မှန်းချက် Bot မှ ကြိုဆိုပါတယ်။**\n\n"
+            "⚽ **ဘောလုံးခန့်မှန်းချက် Bot**\n\n"
             "Command များ:\n"
             "🔹 /predict [အသင်း၁] [အသင်း၂]\n"
             "🔹 /today - ယနေ့ပွဲစဉ်များ\n"
             "🔹 /league [လိဂ်အမည်]\n"
-            "🔹 /teams - အသင်းများစာရင်း\n"
-            "🔹 /leagues - ရရှိနိုင်သော လိဂ်များ",
+            "🔹 /teams - အသင်းများ\n"
+            "🔹 /leagues - လိဂ်များ",
             parse_mode="Markdown"
         )
 
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text(
-            "❌ /predict [အသင်း၁] [အသင်း၂]\n"
-            "ဥပမာ - `/predict Arsenal Chelsea`"
-        )
+        await update.message.reply_text("❌ /predict [အသင်း၁] [အသင်း၂]")
         return
     
     home_team = ' '.join(args[:-1])
@@ -213,10 +203,7 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def league(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "❌ /league [လိဂ်အမည်]\n"
-            "ဥပမာ - `/league premier league`"
-        )
+        await update.message.reply_text("❌ /league [လိဂ်အမည်]\nဥပမာ - `/league premier league`")
         return
     
     league_name = ' '.join(context.args)
@@ -277,12 +264,11 @@ async def leagues(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# ========== ADMIN MENU ==========
+# ---------- Admin Menu ----------
 async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin Menu ကို ခလုတ်များနဲ့ ပြသမယ်"""
     keyboard = [
         [InlineKeyboardButton("⚽ ယနေ့ပွဲစဉ်များ", callback_data="admin_today")],
-        [InlineKeyboardButton("🏆 လိဂ်များစာရင်း", callback_data="admin_leagues")],
+        [InlineKeyboardButton("🏆 လိဂ်များ", callback_data="admin_leagues")],
         [InlineKeyboardButton("📊 ခန့်မှန်းချက်မှတ်တမ်း", callback_data="admin_history")],
     ]
     await update.message.reply_text(
@@ -292,20 +278,17 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin Menu ရဲ့ ခလုတ်တွေကို ကိုင်တွယ်မယ်"""
     query = update.callback_query
     await query.answer()
     
-    user_id = query.from_user.id
-    if not is_admin(user_id):
+    if not is_admin(query.from_user.id):
         await query.edit_message_text("⛔ Admin အတွက်သာ။")
         return
     
     data = query.data
-    logger.info(f"Admin callback: {data} from user {user_id}")
+    logger.info(f"Admin callback: {data}")
     
     if data == "admin_today":
-        # ယနေ့ပွဲစဉ်တွေကို ပြမယ်
         await query.edit_message_text("⏳ ယနေ့ပွဲစဉ်များကို ရှာဖွေနေပါသည်...")
         today_date = datetime.now().strftime('%Y-%m-%d')
         tomorrow_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
@@ -323,7 +306,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, parse_mode="Markdown")
         
     elif data == "admin_leagues":
-        # လိဂ်များစာရင်းကို ပြမယ်
         await query.edit_message_text("⏳ လိဂ်များစာရင်းကို ရှာဖွေနေပါသည်...")
         data = fetch_data("competitions")
         if not data or 'competitions' not in data:
@@ -336,9 +318,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, parse_mode="Markdown")
         
     elif data == "admin_history":
-        # ခန့်မှန်းချက်မှတ်တမ်းကို ပြမယ်
         if not mongo_client:
-            await query.edit_message_text("❌ MongoDB ချိတ်ဆက်မထားပါ။")
+            await query.edit_message_text("❌ MongoDB မရှိပါ။")
             return
         history = list(predictions_col.find().sort("timestamp", -1).limit(10))
         if not history:
@@ -352,74 +333,25 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"   📅 {dt}\n\n"
         await query.edit_message_text(text, parse_mode="Markdown")
 
-# ========== APPLICATION SETUP ==========
-telegram_app = Application.builder().token(TOKEN).build()
+# ---------- Application ----------
+application = Application.builder().token(TOKEN).build()
 
-# Command Handlers
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("predict", predict))
-telegram_app.add_handler(CommandHandler("today", today))
-telegram_app.add_handler(CommandHandler("league", league))
-telegram_app.add_handler(CommandHandler("teams", teams))
-telegram_app.add_handler(CommandHandler("leagues", leagues))
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("predict", predict))
+application.add_handler(CommandHandler("today", today))
+application.add_handler(CommandHandler("league", league))
+application.add_handler(CommandHandler("teams", teams))
+application.add_handler(CommandHandler("leagues", leagues))
+application.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
-# Callback Query Handler for Admin Menu
-telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
+# ---------- Run ----------
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-# ========== WEBHOOK / POLLING ==========
-if WEBHOOK_URL:
-    # Webhook Mode (Render)
-    @app.route('/webhook', methods=['POST'])
-    def webhook():
-        try:
-            data = request.get_json(force=True)
-            update = Update.de_json(data, telegram_app.bot)
-            # Use the event loop from the main thread
-            asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
-            return "ok", 200
-        except Exception as e:
-            logger.exception("Webhook error")
-            return "error", 500
-    
-    def start_flask():
-        port = int(os.environ.get("PORT", 5000))
-        app.run(host="0.0.0.0", port=port, use_reloader=False, debug=False)
-
-else:
-    # Polling Mode (Local development)
-    def run_polling():
-        logger.info("Starting bot in polling mode...")
-        telegram_app.run_polling()
-
-# ========== MAIN ==========
 if __name__ == "__main__":
-    if WEBHOOK_URL:
-        # Webhook mode
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(telegram_app.initialize())
-        loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
-        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
-        
-        import threading
-        threading.Thread(target=start_flask, daemon=True).start()
-        
-        try:
-            loop.run_forever()
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-            loop.run_until_complete(telegram_app.shutdown())
-    else:
-        # Polling mode
-        run_polling()
-else:
-    # Gunicorn mode - setup webhook
-    if WEBHOOK_URL:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        logger.info("Running in Gunicorn mode - setting up webhook...")
-        loop.run_until_complete(telegram_app.initialize())
-        loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
-        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
-    else:
-        logger.warning("WEBHOOK_URL not set - bot will not work in production!")
+    # Flask in background thread
+    threading.Thread(target=run_flask, daemon=True).start()
+    # Start bot polling
+    logger.info("Bot started polling...")
+    application.run_polling()

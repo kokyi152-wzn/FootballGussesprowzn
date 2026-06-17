@@ -1,10 +1,9 @@
 import os
 import asyncio
-import threading
 import logging
 import requests
 from datetime import datetime, timedelta
-from flask import Flask
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from pymongo import MongoClient
@@ -13,14 +12,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Football Prediction Bot is running!"
-
-@app.route('/health')
-def health():
-    return "OK", 200
 
 # ---------- MongoDB ----------
 MONGO_URI = os.environ.get("MONGO_URI")
@@ -31,12 +22,11 @@ if MONGO_URI:
         db = mongo_client["football_bot"]
         predictions_col = db["predictions"]
         users_col = db["users"]
-        logger.info("✅ MongoDB connected successfully")
+        logger.info("✅ MongoDB connected")
     except Exception as e:
         logger.warning(f"MongoDB connection failed: {e}")
         mongo_client = None
 else:
-    logger.warning("MONGO_URI not set - running without database")
     mongo_client = None
 
 # ---------- Telegram Config ----------
@@ -44,6 +34,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 if not TOKEN or not BOT_USERNAME or not FOOTBALL_API_KEY:
     logger.error("Missing required environment variables!")
@@ -335,23 +326,72 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"   📅 {dt}\n\n"
         await query.edit_message_text(text, parse_mode="Markdown")
 
-# ---------- Application ----------
-application = Application.builder().token(TOKEN).build()
+# ========== BUILD APPLICATION ==========
+telegram_app = Application.builder().token(TOKEN).build()
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("predict", predict))
-application.add_handler(CommandHandler("today", today))
-application.add_handler(CommandHandler("league", league))
-application.add_handler(CommandHandler("teams", teams))
-application.add_handler(CommandHandler("leagues", leagues))
-application.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("predict", predict))
+telegram_app.add_handler(CommandHandler("today", today))
+telegram_app.add_handler(CommandHandler("league", league))
+telegram_app.add_handler(CommandHandler("teams", teams))
+telegram_app.add_handler(CommandHandler("leagues", leagues))
+telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
-# ---------- Run ----------
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+# ========== WEBHOOK ROUTE ==========
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, telegram_app.bot)
+        # Use the global loop
+        asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+        return "ok", 200
+    except Exception as e:
+        logger.exception("Webhook error")
+        return "error", 500
+
+# ========== GLOBAL LOOP ==========
+loop = None
+
+# ========== STARTUP ==========
+def setup_webhook_and_run():
+    global loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Initialize and set webhook
+    loop.run_until_complete(telegram_app.initialize())
+    if WEBHOOK_URL:
+        loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
+        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+    else:
+        logger.warning("WEBHOOK_URL not set!")
+    
+    # Start Flask in a separate thread
+    import threading
+    def run_flask():
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port, use_reloader=False, debug=False)
+    
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    # Keep the loop running
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+        loop.run_until_complete(telegram_app.shutdown())
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
-    logger.info("🚀 Bot started polling...")
-    application.run_polling()
+    setup_webhook_and_run()
+else:
+    # Gunicorn mode - setup webhook and run
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    logger.info("Running in Gunicorn mode...")
+    loop.run_until_complete(telegram_app.initialize())
+    if WEBHOOK_URL:
+        loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
+        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+    else:
+        logger.warning("WEBHOOK_URL not set!")

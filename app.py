@@ -307,56 +307,36 @@ telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
-# ---------- Global Event Loop ----------
-loop = None
-
 # ---------- Webhook Route ----------
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    global loop
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        # Schedule the update processing on the global event loop
-        asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+        # Run the update processing in a new event loop
+        asyncio.run(telegram_app.process_update(update))
         return "ok", 200
     except Exception as e:
         logger.exception("Webhook error")
         return "error", 500
 
-# ---------- Setup Webhook and Start ----------
-def setup_and_run():
-    global loop
+# ---------- Setup Webhook ----------
+def setup_webhook():
+    # Initialize the application
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
-    # Initialize and set webhook
     loop.run_until_complete(telegram_app.initialize())
     loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
     logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
-    
-    # Start Flask in a separate thread
-    import threading
-    def run_flask():
-        port = int(os.environ.get("PORT", 5000))
-        app.run(host="0.0.0.0", port=port, use_reloader=False, debug=False)
-    
-    threading.Thread(target=run_flask, daemon=True).start()
-    
-    # Keep the event loop running
-    try:
-        loop.run_forever()
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-        loop.run_until_complete(telegram_app.shutdown())
+
+# ---------- Run Flask ----------
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 if __name__ == "__main__":
-    setup_and_run()
+    setup_webhook()
+    run_flask()
 else:
-    # Gunicorn mode - setup webhook and keep loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    logger.info("Running in Gunicorn mode - setting up webhook...")
-    loop.run_until_complete(telegram_app.initialize())
-    loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
-    logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+    # Gunicorn mode - setup webhook when app loads
+    setup_webhook()

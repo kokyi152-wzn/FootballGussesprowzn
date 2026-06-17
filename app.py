@@ -25,7 +25,6 @@ def health():
 MONGO_URI = os.environ.get("MONGO_URI")
 if MONGO_URI:
     try:
-        # ပြင်ထားတဲ့ Connection – tls=True နဲ့ tlsAllowInvalidCertificates=True
         mongo_client = MongoClient(
             MONGO_URI,
             tls=True,

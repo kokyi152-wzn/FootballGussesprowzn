@@ -138,12 +138,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         logger.info(f"✅ /start from user: {user_id}")
         
+        # Admin ID စစ်ဆေးပါ
+        logger.info(f"Admin IDs: {ADMIN_IDS}")
+        logger.info(f"Is user admin? {is_admin(user_id)}")
+        
         if mongo_client:
             users_col.update_one({"user_id": user_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
+            logger.info(f"User {user_id} saved to MongoDB")
         
         if is_admin(user_id):
+            logger.info(f"Showing admin menu for user {user_id}")
             await show_admin_menu(update, context)
         else:
+            logger.info(f"Showing regular menu for user {user_id}")
             await update.message.reply_text(
                 "⚽ **ဘောလုံးခန့်မှန်းချက် Bot**\n\n"
                 "Command များ:\n"
@@ -156,8 +163,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         logger.info(f"✅ /start completed for user {user_id}")
     except Exception as e:
-        logger.exception(f"❌ Error in start handler: {e}")
-        await update.message.reply_text("❌ တစ်ခုခုမှားနေတယ်။ နောက်မှထပ်ကြည့်ပါ။")
+        logger.exception(f"❌❌❌ CRITICAL Error in start handler: {e}")
+        try:
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+        except:
+            pass
 
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -193,7 +203,7 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"✅ Prediction completed: {home_team} vs {away_team}")
     except Exception as e:
         logger.exception(f"❌ Error in predict handler: {e}")
-        await update.message.reply_text("❌ ခန့်မှန်းချက် မအောင်မြင်ပါ။")
+        await update.message.reply_text("❌ ခန့်မှန်းချက် မအောင်မြင်ပါ။ နောက်မှထပ်ကြည့်ပါ။")
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -303,16 +313,20 @@ async def leagues(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Admin Menu ----------
 async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("⚽ ယနေ့ပွဲစဉ်များ", callback_data="admin_today")],
-        [InlineKeyboardButton("🏆 လိဂ်များစာရင်း", callback_data="admin_leagues")],
-        [InlineKeyboardButton("📊 ခန့်မှန်းချက်မှတ်တမ်း", callback_data="admin_history")],
-    ]
-    await update.message.reply_text(
-        "🤖 **Admin Panel**\n\nအောက်ပါခလုတ်များမှ ရွေးချယ်ပါ။",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    try:
+        keyboard = [
+            [InlineKeyboardButton("⚽ ယနေ့ပွဲစဉ်များ", callback_data="admin_today")],
+            [InlineKeyboardButton("🏆 လိဂ်များစာရင်း", callback_data="admin_leagues")],
+            [InlineKeyboardButton("📊 ခန့်မှန်းချက်မှတ်တမ်း", callback_data="admin_history")],
+        ]
+        await update.message.reply_text(
+            "🤖 **Admin Panel**\n\nအောက်ပါခလုတ်များမှ ရွေးချယ်ပါ။",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.exception(f"❌ Error in show_admin_menu: {e}")
+        await update.message.reply_text(f"❌ Admin menu error: {str(e)}")
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -372,7 +386,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text, parse_mode="Markdown")
     except Exception as e:
         logger.exception(f"❌ Error in admin_callback: {e}")
-        await query.edit_message_text("❌ အမှားတစ်ခုဖြစ်ပွားခဲ့ပါသည်။")
+        await query.edit_message_text(f"❌ Error: {str(e)}")
 
 # ========== BUILD APPLICATION ==========
 telegram_app = Application.builder().token(TOKEN).build()
@@ -391,7 +405,6 @@ def webhook():
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        # asyncio.run() ကို သုံးပြီး process_update ကို run မယ်
         asyncio.run(telegram_app.process_update(update))
         return "ok", 200
     except Exception as e:
@@ -400,20 +413,16 @@ def webhook():
 
 # ========== MAIN ==========
 if __name__ == "__main__":
-    # Local testing - polling mode
     logger.info("Starting bot in polling mode...")
     telegram_app.run_polling()
 else:
-    # Gunicorn mode - webhook mode
     logger.info("Running in Gunicorn mode with webhook...")
     
-    # **အဓိက - Application ကို initialize လုပ်ပါ**
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(telegram_app.initialize())
     logger.info("✅ Application initialized")
     
-    # Webhook သတ်မှတ်ပါ
     if WEBHOOK_URL:
         try:
             response = requests.post(
@@ -426,7 +435,6 @@ else:
     else:
         logger.warning("WEBHOOK_URL not set!")
     
-    # Keep the loop running
     def keep_loop():
         try:
             loop.run_forever()
@@ -435,5 +443,3 @@ else:
     
     import threading
     threading.Thread(target=keep_loop, daemon=True).start()
-    
-    # Flask is run by Gunicorn, so we don't need to start it here

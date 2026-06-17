@@ -410,7 +410,6 @@ def webhook():
         update = Update.de_json(data, telegram_app.bot)
         
         if loop is not None:
-            # Use the existing loop to process the update
             asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
             logger.info("✅ Update queued for processing")
             return "ok", 200
@@ -428,7 +427,7 @@ if __name__ == "__main__":
 else:
     logger.info("Running in Gunicorn mode with webhook...")
     
-    global loop
+    # Initialize loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(telegram_app.initialize())

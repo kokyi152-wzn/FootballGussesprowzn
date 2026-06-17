@@ -1,11 +1,10 @@
 import os
 import logging
 import requests
-import json
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
-import telegram
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from pymongo import MongoClient
 
 # ---------- Flask app ----------
@@ -48,14 +47,10 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 if not TOKEN or not BOT_USERNAME or not FOOTBALL_API_KEY:
     logger.error("Missing required environment variables!")
     exit(1)
-
-# Telegram Bot object (synchronous)
-bot = telegram.Bot(token=TOKEN)
 
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {'X-Auth-Token': FOOTBALL_API_KEY}
@@ -134,9 +129,9 @@ def calculate_prediction(home_team, away_team):
     
     return {'home_win': home_win, 'draw': draw, 'away_win': away_win, 'result': result}
 
-# ========== COMMAND HANDLERS (Synchronous) ==========
+# ========== TELEGRAM HANDLERS ==========
 
-def handle_start(update):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
         logger.info(f"✅ /start from user: {user_id}")
@@ -145,58 +140,37 @@ def handle_start(update):
             users_col.update_one({"user_id": user_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
         
         if is_admin(user_id):
-            keyboard = [
-                [InlineKeyboardButton("⚽ ယနေ့ပွဲစဉ်များ", callback_data="admin_today")],
-                [InlineKeyboardButton("🏆 လိဂ်များစာရင်း", callback_data="admin_leagues")],
-                [InlineKeyboardButton("📊 ခန့်မှန်းချက်မှတ်တမ်း", callback_data="admin_history")],
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            bot.send_message(
-                chat_id=user_id,
-                text="🤖 **Admin Panel**\n\nအောက်ပါခလုတ်များမှ ရွေးချယ်ပါ။",
-                parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
+            await show_admin_menu(update, context)
         else:
-            bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "⚽ **ဘောလုံးခန့်မှန်းချက် Bot**\n\n"
-                    "Command များ:\n"
-                    "🔹 /predict [အသင်း၁] [အသင်း၂] - ခန့်မှန်းချက်\n"
-                    "🔹 /today - ယနေ့ပွဲစဉ်များ\n"
-                    "🔹 /league [လိဂ်အမည်] - လိဂ်ပွဲစဉ်များ\n"
-                    "🔹 /teams - အသင်းများစာရင်း\n"
-                    "🔹 /leagues - လိဂ်များစာရင်း"
-                ),
+            await update.message.reply_text(
+                "⚽ **ဘောလုံးခန့်မှန်းချက် Bot**\n\n"
+                "Command များ:\n"
+                "🔹 /predict [အသင်း၁] [အသင်း၂] - ခန့်မှန်းချက်\n"
+                "🔹 /today - ယနေ့ပွဲစဉ်များ\n"
+                "🔹 /league [လိဂ်အမည်] - လိဂ်ပွဲစဉ်များ\n"
+                "🔹 /teams - အသင်းများစာရင်း\n"
+                "🔹 /leagues - လိဂ်များစာရင်း",
                 parse_mode="Markdown"
             )
         logger.info(f"✅ /start completed for user {user_id}")
     except Exception as e:
         logger.exception(f"❌ Error in start handler: {e}")
         try:
-            bot.send_message(chat_id=user_id, text="❌ တစ်ခုခုမှားနေတယ်။ နောက်မှထပ်ကြည့်ပါ။")
+            await update.message.reply_text("❌ တစ်ခုခုမှားနေတယ်။ နောက်မှထပ်ကြည့်ပါ။")
         except:
             pass
 
-def handle_predict(update, args):
+async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        user_id = update.effective_user.id
+        args = context.args
         if len(args) < 2:
-            bot.send_message(
-                chat_id=user_id,
-                text="❌ /predict [အသင်း၁] [အသင်း၂]\nဥပမာ: /predict Arsenal Chelsea"
-            )
+            await update.message.reply_text("❌ /predict [အသင်း၁] [အသင်း၂]\nဥပမာ: /predict Arsenal Chelsea")
             return
         
         home_team = ' '.join(args[:-1])
         away_team = args[-1]
         
-        msg = bot.send_message(
-            chat_id=user_id,
-            text=f"⏳ `{home_team}` vs `{away_team}` ကို ခန့်မှန်းနေပါသည်...",
-            parse_mode="Markdown"
-        )
+        msg = await update.message.reply_text(f"⏳ `{home_team}` vs `{away_team}` ကို ခန့်မှန်းနေပါသည်...", parse_mode="Markdown")
         
         prediction = calculate_prediction(home_team, away_team)
         
@@ -216,21 +190,15 @@ def handle_predict(update, args):
         result_text += f"✈️ **{away_team}** အနိုင်ရနိုင်ခြေ: {prediction['away_win']}%\n\n"
         result_text += f"📊 {prediction['result']}"
         
-        bot.edit_message_text(
-            chat_id=user_id,
-            message_id=msg.message_id,
-            text=result_text,
-            parse_mode="Markdown"
-        )
+        await msg.edit_text(result_text, parse_mode="Markdown")
         logger.info(f"✅ Prediction completed: {home_team} vs {away_team}")
     except Exception as e:
         logger.exception(f"❌ Error in predict handler: {e}")
-        bot.send_message(chat_id=user_id, text="❌ ခန့်မှန်းချက် မအောင်မြင်ပါ။")
+        await update.message.reply_text("❌ ခန့်မှန်းချက် မအောင်မြင်ပါ။")
 
-def handle_today(update):
+async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        user_id = update.effective_user.id
-        bot.send_message(chat_id=user_id, text="⏳ ယနေ့ပွဲစဉ်များကို ရှာဖွေနေပါသည်...")
+        await update.message.reply_text("⏳ ယနေ့ပွဲစဉ်များကို ရှာဖွေနေပါသည်...")
         
         today_date = datetime.now().strftime('%Y-%m-%d')
         tomorrow_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
@@ -238,70 +206,68 @@ def handle_today(update):
         data = fetch_data(f"matches?dateFrom={today_date}&dateTo={tomorrow_date}")
         
         if not data or 'matches' not in data:
-            bot.send_message(chat_id=user_id, text="❌ ယနေ့ပွဲစဉ်များ မတွေ့ပါ။")
+            await update.message.reply_text("❌ ယနေ့ပွဲစဉ်များ မတွေ့ပါ။")
             return
         
         matches = data['matches'][:10]
         if not matches:
-            bot.send_message(chat_id=user_id, text="📅 ယနေ့ပွဲစဉ်များ မရှိပါ။")
+            await update.message.reply_text("📅 ယနေ့ပွဲစဉ်များ မရှိပါ။")
             return
         
         text = "📅 **ယနေ့ပွဲစဉ်များ**\n\n"
         for match in matches:
             text += format_match(match) + "\n\n"
         
-        bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+        await update.message.reply_text(text, parse_mode="Markdown")
         logger.info("✅ Today matches sent")
     except Exception as e:
         logger.exception(f"❌ Error in today handler: {e}")
-        bot.send_message(chat_id=user_id, text="❌ ပွဲစဉ်များ ရယူရာတွင် အမှားရှိပါသည်။")
+        await update.message.reply_text("❌ ပွဲစဉ်များ ရယူရာတွင် အမှားရှိပါသည်။")
 
-def handle_league(update, args):
+async def league(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        user_id = update.effective_user.id
-        if not args:
-            bot.send_message(chat_id=user_id, text="❌ /league [လိဂ်အမည်]\nဥပမာ: /league premier league")
+        if not context.args:
+            await update.message.reply_text("❌ /league [လိဂ်အမည်]\nဥပမာ: /league premier league")
             return
         
-        league_name = ' '.join(args)
+        league_name = ' '.join(context.args)
         league_id = get_league_id(league_name)
         
         if not league_id:
-            bot.send_message(chat_id=user_id, text=f"❌ `{league_name}` လိဂ်ကို မတွေ့ပါ။", parse_mode="Markdown")
+            await update.message.reply_text(f"❌ `{league_name}` လိဂ်ကို မတွေ့ပါ။", parse_mode="Markdown")
             return
         
-        bot.send_message(chat_id=user_id, text=f"⏳ `{league_name}` ပွဲစဉ်များကို ရှာဖွေနေပါသည်...", parse_mode="Markdown")
+        await update.message.reply_text(f"⏳ `{league_name}` ပွဲစဉ်များကို ရှာဖွေနေပါသည်...", parse_mode="Markdown")
         
         data = fetch_data(f"competitions/{league_id}/matches")
         
         if not data or 'matches' not in data:
-            bot.send_message(chat_id=user_id, text=f"❌ `{league_name}` ပွဲစဉ်များ မတွေ့ပါ။", parse_mode="Markdown")
+            await update.message.reply_text(f"❌ `{league_name}` ပွဲစဉ်များ မတွေ့ပါ။", parse_mode="Markdown")
             return
         
         matches = data['matches'][:10]
         if not matches:
-            bot.send_message(chat_id=user_id, text=f"📅 `{league_name}` တွင် ပွဲစဉ်များ မရှိပါ။", parse_mode="Markdown")
+            await update.message.reply_text(f"📅 `{league_name}` တွင် ပွဲစဉ်များ မရှိပါ။", parse_mode="Markdown")
             return
         
         text = f"⚽ **{league_name.upper()}**\n\n"
         for match in matches:
             text += format_match(match) + "\n\n"
         
-        bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+        await update.message.reply_text(text, parse_mode="Markdown")
         logger.info(f"✅ League matches sent: {league_name}")
     except Exception as e:
         logger.exception(f"❌ Error in league handler: {e}")
-        bot.send_message(chat_id=user_id, text="❌ လိဂ်ပွဲစဉ်များ ရယူရာတွင် အမှားရှိပါသည်။")
+        await update.message.reply_text("❌ လိဂ်ပွဲစဉ်များ ရယူရာတွင် အမှားရှိပါသည်။")
 
-def handle_teams(update):
+async def teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        user_id = update.effective_user.id
-        bot.send_message(chat_id=user_id, text="⏳ အသင်းများစာရင်းကို ရှာဖွေနေပါသည်...")
+        await update.message.reply_text("⏳ အသင်းများစာရင်းကို ရှာဖွေနေပါသည်...")
         
         data = fetch_data("teams")
         
         if not data or 'teams' not in data:
-            bot.send_message(chat_id=user_id, text="❌ အသင်းများစာရင်း မတွေ့ပါ။")
+            await update.message.reply_text("❌ အသင်းများစာရင်း မတွေ့ပါ။")
             return
         
         teams_list = data['teams'][:20]
@@ -309,21 +275,20 @@ def handle_teams(update):
         for team in teams_list:
             text += f"• {team['name']}\n"
         
-        bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+        await update.message.reply_text(text, parse_mode="Markdown")
         logger.info("✅ Teams list sent")
     except Exception as e:
         logger.exception(f"❌ Error in teams handler: {e}")
-        bot.send_message(chat_id=user_id, text="❌ အသင်းစာရင်း ရယူရာတွင် အမှားရှိပါသည်။")
+        await update.message.reply_text("❌ အသင်းစာရင်း ရယူရာတွင် အမှားရှိပါသည်။")
 
-def handle_leagues(update):
+async def leagues(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        user_id = update.effective_user.id
-        bot.send_message(chat_id=user_id, text="⏳ လိဂ်များစာရင်းကို ရှာဖွေနေပါသည်...")
+        await update.message.reply_text("⏳ လိဂ်များစာရင်းကို ရှာဖွေနေပါသည်...")
         
         data = fetch_data("competitions")
         
         if not data or 'competitions' not in data:
-            bot.send_message(chat_id=user_id, text="❌ လိဂ်များစာရင်း မတွေ့ပါ။")
+            await update.message.reply_text("❌ လိဂ်များစာရင်း မတွေ့ပါ။")
             return
         
         leagues_list = data['competitions'][:20]
@@ -331,63 +296,73 @@ def handle_leagues(update):
         for comp in leagues_list:
             text += f"• {comp['name']} ({comp.get('code', 'N/A')})\n"
         
-        bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+        await update.message.reply_text(text, parse_mode="Markdown")
         logger.info("✅ Leagues list sent")
     except Exception as e:
         logger.exception(f"❌ Error in leagues handler: {e}")
-        bot.send_message(chat_id=user_id, text="❌ လိဂ်စာရင်း ရယူရာတွင် အမှားရှိပါသည်။")
+        await update.message.reply_text("❌ လိဂ်စာရင်း ရယူရာတွင် အမှားရှိပါသည်။")
 
-def handle_callback_query(update):
+# ---------- Admin Menu ----------
+async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("⚽ ယနေ့ပွဲစဉ်များ", callback_data="admin_today")],
+        [InlineKeyboardButton("🏆 လိဂ်များစာရင်း", callback_data="admin_leagues")],
+        [InlineKeyboardButton("📊 ခန့်မှန်းချက်မှတ်တမ်း", callback_data="admin_history")],
+    ]
+    await update.message.reply_text(
+        "🤖 **Admin Panel**\n\nအောက်ပါခလုတ်များမှ ရွေးချယ်ပါ။",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
-        user_id = query.from_user.id
+        await query.answer()
         
-        if not is_admin(user_id):
-            bot.answer_callback_query(callback_query_id=query.id, text="⛔ Admin အတွက်သာ။")
+        if not is_admin(query.from_user.id):
+            await query.edit_message_text("⛔ Admin အတွက်သာ။")
             return
         
         data = query.data
         logger.info(f"Admin callback: {data}")
         
         if data == "admin_today":
-            bot.answer_callback_query(callback_query_id=query.id)
-            bot.send_message(chat_id=user_id, text="⏳ ယနေ့ပွဲစဉ်များကို ရှာဖွေနေပါသည်...")
+            await query.edit_message_text("⏳ ယနေ့ပွဲစဉ်များကို ရှာဖွေနေပါသည်...")
             today_date = datetime.now().strftime('%Y-%m-%d')
             tomorrow_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
             data = fetch_data(f"matches?dateFrom={today_date}&dateTo={tomorrow_date}")
             if not data or 'matches' not in data:
-                bot.send_message(chat_id=user_id, text="❌ ယနေ့ပွဲစဉ်များ မတွေ့ပါ။")
+                await query.edit_message_text("❌ ယနေ့ပွဲစဉ်များ မတွေ့ပါ။")
                 return
             matches = data['matches'][:10]
             if not matches:
-                bot.send_message(chat_id=user_id, text="📅 ယနေ့ပွဲစဉ်များ မရှိပါ။")
+                await query.edit_message_text("📅 ယနေ့ပွဲစဉ်များ မရှိပါ။")
                 return
             text = "📅 **ယနေ့ပွဲစဉ်များ**\n\n"
             for match in matches:
                 text += format_match(match) + "\n\n"
-            bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+            await query.edit_message_text(text, parse_mode="Markdown")
             
         elif data == "admin_leagues":
-            bot.answer_callback_query(callback_query_id=query.id)
-            bot.send_message(chat_id=user_id, text="⏳ လိဂ်များစာရင်းကို ရှာဖွေနေပါသည်...")
+            await query.edit_message_text("⏳ လိဂ်များစာရင်းကို ရှာဖွေနေပါသည်...")
             data = fetch_data("competitions")
             if not data or 'competitions' not in data:
-                bot.send_message(chat_id=user_id, text="❌ လိဂ်များစာရင်း မတွေ့ပါ။")
+                await query.edit_message_text("❌ လိဂ်များစာရင်း မတွေ့ပါ။")
                 return
             leagues_list = data['competitions'][:20]
             text = "⚽ **ရရှိနိုင်သော လိဂ်များ**\n\n"
             for comp in leagues_list:
                 text += f"• {comp['name']} ({comp.get('code', 'N/A')})\n"
-            bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+            await query.edit_message_text(text, parse_mode="Markdown")
             
         elif data == "admin_history":
-            bot.answer_callback_query(callback_query_id=query.id)
             if not mongo_client:
-                bot.send_message(chat_id=user_id, text="❌ MongoDB မရှိပါ။")
+                await query.edit_message_text("❌ MongoDB မရှိပါ။")
                 return
             history = list(predictions_col.find().sort("timestamp", -1).limit(10))
             if not history:
-                bot.send_message(chat_id=user_id, text="📊 ခန့်မှန်းချက်မှတ်တမ်း မရှိသေးပါ။")
+                await query.edit_message_text("📊 ခန့်မှန်းချက်မှတ်တမ်း မရှိသေးပါ။")
                 return
             text = "📊 **နောက်ဆုံး ခန့်မှန်းချက် ၁၀ ခု**\n\n"
             for i, h in enumerate(history, 1):
@@ -395,71 +370,43 @@ def handle_callback_query(update):
                 text += f"{i}. {h.get('home_team', 'N/A')} vs {h.get('away_team', 'N/A')}\n"
                 text += f"   🏠{h.get('home_win', 0)}% 🤝{h.get('draw', 0)}% ✈️{h.get('away_win', 0)}%\n"
                 text += f"   📅 {dt}\n\n"
-            bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+            await query.edit_message_text(text, parse_mode="Markdown")
     except Exception as e:
-        logger.exception(f"❌ Error in callback handler: {e}")
+        logger.exception(f"❌ Error in admin_callback: {e}")
+        await query.edit_message_text("❌ အမှားတစ်ခုဖြစ်ပွားခဲ့ပါသည်။")
 
-# ========== WEBHOOK ROUTE ==========
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, bot)
-        
-        # Handle different update types
-        if update.message:
-            if update.message.text:
-                text = update.message.text
-                if text.startswith('/'):
-                    parts = text.split()
-                    command = parts[0].lower()
-                    args = parts[1:]
-                    
-                    if command == '/start':
-                        handle_start(update)
-                    elif command == '/predict':
-                        handle_predict(update, args)
-                    elif command == '/today':
-                        handle_today(update)
-                    elif command == '/league':
-                        handle_league(update, args)
-                    elif command == '/teams':
-                        handle_teams(update)
-                    elif command == '/leagues':
-                        handle_leagues(update)
-                    else:
-                        bot.send_message(chat_id=update.effective_user.id, text="❌ မသိသော command ပါ။")
-        
-        elif update.callback_query:
-            handle_callback_query(update)
-        
-        return "ok", 200
-    except Exception as e:
-        logger.exception(f"Webhook error: {e}")
-        return "error", 500
+# ========== BUILD APPLICATION ==========
+telegram_app = Application.builder().token(TOKEN).build()
+
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("predict", predict))
+telegram_app.add_handler(CommandHandler("today", today))
+telegram_app.add_handler(CommandHandler("league", league))
+telegram_app.add_handler(CommandHandler("teams", teams))
+telegram_app.add_handler(CommandHandler("leagues", leagues))
+telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
 # ========== MAIN ==========
 if __name__ == "__main__":
     logger.info("Starting bot in polling mode...")
-    # For local testing, use polling with Updater
-    from telegram.ext import Updater
-    updater = Updater(token=TOKEN, use_context=True)
-    # Add handlers... but for simplicity, just use webhook
-    app.run(host="0.0.0.0", port=os.environ.get("PORT", 5000), debug=True)
+    telegram_app.run_polling()
 else:
-    # Gunicorn mode - webhook only
-    logger.info("Running in Gunicorn mode with webhook...")
-    # Set webhook
-    if WEBHOOK_URL:
-        try:
-            response = requests.post(
-                f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-                json={"url": WEBHOOK_URL}
-            )
-            logger.info(f"Webhook set: {response.json()}")
-        except Exception as e:
-            logger.error(f"Failed to set webhook: {e}")
-    else:
-        logger.warning("WEBHOOK_URL not set!")
+    # Render အတွက် - Flask app ကို run ပြီး polling ကို background thread မှာ run မယ်
+    logger.info("Starting bot in polling mode on Render...")
     
-    logger.info("✅ Bot is running with webhook (synchronous mode)")
+    import threading
+    import asyncio
+    
+    def run_polling():
+        # Create new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(telegram_app.initialize())
+        loop.run_until_complete(telegram_app.start())
+        loop.run_until_complete(telegram_app.updater.start_polling())
+        loop.run_forever()
+    
+    # Start polling in background thread
+    polling_thread = threading.Thread(target=run_polling, daemon=True)
+    polling_thread.start()
+    logger.info("✅ Bot is running with polling")

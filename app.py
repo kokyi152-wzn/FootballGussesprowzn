@@ -2,9 +2,8 @@ import os
 import asyncio
 import logging
 import requests
-import traceback
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from pymongo import MongoClient
@@ -12,11 +11,7 @@ from pymongo import MongoClient
 # ---------- Flask app ----------
 app = Flask(__name__)
 
-# ---------- Logging ကို ပိုအသေးစိတ်ထုတ်ဖို့ ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 @app.route('/')
@@ -145,13 +140,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if mongo_client:
             users_col.update_one({"user_id": user_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
-            logger.info(f"User {user_id} saved to MongoDB")
         
         if is_admin(user_id):
-            logger.info(f"User {user_id} is admin, showing admin menu")
             await show_admin_menu(update, context)
         else:
-            logger.info(f"User {user_id} is regular user, showing start menu")
             await update.message.reply_text(
                 "⚽ **ဘောလုံးခန့်မှန်းချက် Bot**\n\n"
                 "Command များ:\n"
@@ -165,10 +157,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"✅ /start completed for user {user_id}")
     except Exception as e:
         logger.exception(f"❌ Error in start handler: {e}")
-        try:
-            await update.message.reply_text("❌ တစ်ခုခုမှားနေတယ်။ နောက်မှထပ်ကြည့်ပါ။")
-        except:
-            pass
+        await update.message.reply_text("❌ တစ်ခုခုမှားနေတယ်။ နောက်မှထပ်ကြည့်ပါ။")
 
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -204,7 +193,7 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"✅ Prediction completed: {home_team} vs {away_team}")
     except Exception as e:
         logger.exception(f"❌ Error in predict handler: {e}")
-        await update.message.reply_text("❌ ခန့်မှန်းချက် မအောင်မြင်ပါ။ နောက်မှထပ်ကြည့်ပါ။")
+        await update.message.reply_text("❌ ခန့်မှန်းချက် မအောင်မြင်ပါ။")
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -396,77 +385,36 @@ telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
-# ========== GLOBAL LOOP ==========
-loop = None
-
 # ========== WEBHOOK ROUTE ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    global loop
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        if loop is not None:
-            future = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
-            try:
-                future.result(timeout=15)
-                logger.info("✅ Update processed successfully")
-            except Exception as e:
-                logger.exception(f"Error processing update: {e}")
-                return "error", 500
-            return "ok", 200
-        else:
-            logger.error("Loop is None!")
-            return "error", 500
+        # Process update directly without asyncio
+        asyncio.run(telegram_app.process_update(update))
+        return "ok", 200
     except Exception as e:
-        logger.exception("Webhook error")
+        logger.exception(f"Webhook error: {e}")
         return "error", 500
 
-# ========== STARTUP ==========
-def setup_webhook_and_run():
-    global loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    loop.run_until_complete(telegram_app.initialize())
-    if WEBHOOK_URL:
-        loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
-        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
-    else:
-        logger.warning("WEBHOOK_URL not set!")
-    
-    import threading
-    def run_flask():
-        port = int(os.environ.get("PORT", 5000))
-        app.run(host="0.0.0.0", port=port, use_reloader=False, debug=False)
-    
-    threading.Thread(target=run_flask, daemon=True).start()
-    
-    try:
-        loop.run_forever()
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-        loop.run_until_complete(telegram_app.shutdown())
-
+# ========== MAIN ==========
 if __name__ == "__main__":
-    setup_webhook_and_run()
+    # Use polling mode (no webhook needed)
+    logger.info("Starting bot in polling mode...")
+    telegram_app.run_polling(allowed_updates=Update.ALL_TYPES)
 else:
-    # Gunicorn mode
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    logger.info("Running in Gunicorn mode...")
-    loop.run_until_complete(telegram_app.initialize())
-    if WEBHOOK_URL:
-        loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
-        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
-    else:
-        logger.warning("WEBHOOK_URL not set!")
+    # Gunicorn mode - use webhook
+    logger.info("Running in Gunicorn mode with webhook...")
+    # Set webhook
+    import requests
+    webhook_url = f"https://footballgussesprowzn.onrender.com/webhook"
+    response = requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+        json={"url": webhook_url}
+    )
+    logger.info(f"Webhook set: {response.json()}")
     
-    import threading
-    def keep_loop():
-        try:
-            loop.run_forever()
-        except Exception as e:
-            logger.exception(f"Loop error: {e}")
-    
-    threading.Thread(target=keep_loop, daemon=True).start()
+    # Start Flask (Gunicorn will handle it)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

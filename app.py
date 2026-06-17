@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import requests
+import traceback
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -11,7 +12,11 @@ from pymongo import MongoClient
 # ---------- Flask app ----------
 app = Flask(__name__)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# ---------- Logging ကို ပိုအသေးစိတ်ထုတ်ဖို့ ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 @app.route('/')
@@ -134,142 +139,178 @@ def calculate_prediction(home_team, away_team):
 # ========== TELEGRAM HANDLERS ==========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    logger.info(f"✅ /start from user: {user_id}")
-    
-    if mongo_client:
-        users_col.update_one({"user_id": user_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
-    
-    if is_admin(user_id):
-        await show_admin_menu(update, context)
-    else:
-        await update.message.reply_text(
-            "⚽ **ဘောလုံးခန့်မှန်းချက် Bot**\n\n"
-            "Command များ:\n"
-            "🔹 /predict [အသင်း၁] [အသင်း၂] - ခန့်မှန်းချက်\n"
-            "🔹 /today - ယနေ့ပွဲစဉ်များ\n"
-            "🔹 /league [လိဂ်အမည်] - လိဂ်ပွဲစဉ်များ\n"
-            "🔹 /teams - အသင်းများစာရင်း\n"
-            "🔹 /leagues - လိဂ်များစာရင်း",
-            parse_mode="Markdown"
-        )
+    try:
+        user_id = update.effective_user.id
+        logger.info(f"✅ /start from user: {user_id}")
+        
+        if mongo_client:
+            users_col.update_one({"user_id": user_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
+            logger.info(f"User {user_id} saved to MongoDB")
+        
+        if is_admin(user_id):
+            logger.info(f"User {user_id} is admin, showing admin menu")
+            await show_admin_menu(update, context)
+        else:
+            logger.info(f"User {user_id} is regular user, showing start menu")
+            await update.message.reply_text(
+                "⚽ **ဘောလုံးခန့်မှန်းချက် Bot**\n\n"
+                "Command များ:\n"
+                "🔹 /predict [အသင်း၁] [အသင်း၂] - ခန့်မှန်းချက်\n"
+                "🔹 /today - ယနေ့ပွဲစဉ်များ\n"
+                "🔹 /league [လိဂ်အမည်] - လိဂ်ပွဲစဉ်များ\n"
+                "🔹 /teams - အသင်းများစာရင်း\n"
+                "🔹 /leagues - လိဂ်များစာရင်း",
+                parse_mode="Markdown"
+            )
+        logger.info(f"✅ /start completed for user {user_id}")
+    except Exception as e:
+        logger.exception(f"❌ Error in start handler: {e}")
+        try:
+            await update.message.reply_text("❌ တစ်ခုခုမှားနေတယ်။ နောက်မှထပ်ကြည့်ပါ။")
+        except:
+            pass
 
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("❌ /predict [အသင်း၁] [အသင်း၂]\nဥပမာ: /predict Arsenal Chelsea")
-        return
-    
-    home_team = ' '.join(args[:-1])
-    away_team = args[-1]
-    
-    msg = await update.message.reply_text(f"⏳ `{home_team}` vs `{away_team}` ကို ခန့်မှန်းနေပါသည်...", parse_mode="Markdown")
-    
-    prediction = calculate_prediction(home_team, away_team)
-    
-    if mongo_client:
-        predictions_col.insert_one({
-            "home_team": home_team,
-            "away_team": away_team,
-            "home_win": prediction['home_win'],
-            "draw": prediction['draw'],
-            "away_win": prediction['away_win'],
-            "timestamp": datetime.now()
-        })
-    
-    result_text = f"⚽ **{home_team}** vs **{away_team}**\n\n"
-    result_text += f"🏠 **{home_team}** အနိုင်ရနိုင်ခြေ: {prediction['home_win']}%\n"
-    result_text += f"🤝 သရေကျနိုင်ခြေ: {prediction['draw']}%\n"
-    result_text += f"✈️ **{away_team}** အနိုင်ရနိုင်ခြေ: {prediction['away_win']}%\n\n"
-    result_text += f"📊 {prediction['result']}"
-    
-    await msg.edit_text(result_text, parse_mode="Markdown")
+    try:
+        args = context.args
+        if len(args) < 2:
+            await update.message.reply_text("❌ /predict [အသင်း၁] [အသင်း၂]\nဥပမာ: /predict Arsenal Chelsea")
+            return
+        
+        home_team = ' '.join(args[:-1])
+        away_team = args[-1]
+        
+        msg = await update.message.reply_text(f"⏳ `{home_team}` vs `{away_team}` ကို ခန့်မှန်းနေပါသည်...", parse_mode="Markdown")
+        
+        prediction = calculate_prediction(home_team, away_team)
+        
+        if mongo_client:
+            predictions_col.insert_one({
+                "home_team": home_team,
+                "away_team": away_team,
+                "home_win": prediction['home_win'],
+                "draw": prediction['draw'],
+                "away_win": prediction['away_win'],
+                "timestamp": datetime.now()
+            })
+        
+        result_text = f"⚽ **{home_team}** vs **{away_team}**\n\n"
+        result_text += f"🏠 **{home_team}** အနိုင်ရနိုင်ခြေ: {prediction['home_win']}%\n"
+        result_text += f"🤝 သရေကျနိုင်ခြေ: {prediction['draw']}%\n"
+        result_text += f"✈️ **{away_team}** အနိုင်ရနိုင်ခြေ: {prediction['away_win']}%\n\n"
+        result_text += f"📊 {prediction['result']}"
+        
+        await msg.edit_text(result_text, parse_mode="Markdown")
+        logger.info(f"✅ Prediction completed: {home_team} vs {away_team}")
+    except Exception as e:
+        logger.exception(f"❌ Error in predict handler: {e}")
+        await update.message.reply_text("❌ ခန့်မှန်းချက် မအောင်မြင်ပါ။ နောက်မှထပ်ကြည့်ပါ။")
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ ယနေ့ပွဲစဉ်များကို ရှာဖွေနေပါသည်...")
-    
-    today_date = datetime.now().strftime('%Y-%m-%d')
-    tomorrow_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-    
-    data = fetch_data(f"matches?dateFrom={today_date}&dateTo={tomorrow_date}")
-    
-    if not data or 'matches' not in data:
-        await update.message.reply_text("❌ ယနေ့ပွဲစဉ်များ မတွေ့ပါ။")
-        return
-    
-    matches = data['matches'][:10]
-    if not matches:
-        await update.message.reply_text("📅 ယနေ့ပွဲစဉ်များ မရှိပါ။")
-        return
-    
-    text = "📅 **ယနေ့ပွဲစဉ်များ**\n\n"
-    for match in matches:
-        text += format_match(match) + "\n\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
+    try:
+        await update.message.reply_text("⏳ ယနေ့ပွဲစဉ်များကို ရှာဖွေနေပါသည်...")
+        
+        today_date = datetime.now().strftime('%Y-%m-%d')
+        tomorrow_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        data = fetch_data(f"matches?dateFrom={today_date}&dateTo={tomorrow_date}")
+        
+        if not data or 'matches' not in data:
+            await update.message.reply_text("❌ ယနေ့ပွဲစဉ်များ မတွေ့ပါ။")
+            return
+        
+        matches = data['matches'][:10]
+        if not matches:
+            await update.message.reply_text("📅 ယနေ့ပွဲစဉ်များ မရှိပါ။")
+            return
+        
+        text = "📅 **ယနေ့ပွဲစဉ်များ**\n\n"
+        for match in matches:
+            text += format_match(match) + "\n\n"
+        
+        await update.message.reply_text(text, parse_mode="Markdown")
+        logger.info("✅ Today matches sent")
+    except Exception as e:
+        logger.exception(f"❌ Error in today handler: {e}")
+        await update.message.reply_text("❌ ပွဲစဉ်များ ရယူရာတွင် အမှားရှိပါသည်။")
 
 async def league(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ /league [လိဂ်အမည်]\nဥပမာ: /league premier league")
-        return
-    
-    league_name = ' '.join(context.args)
-    league_id = get_league_id(league_name)
-    
-    if not league_id:
-        await update.message.reply_text(f"❌ `{league_name}` လိဂ်ကို မတွေ့ပါ။", parse_mode="Markdown")
-        return
-    
-    await update.message.reply_text(f"⏳ `{league_name}` ပွဲစဉ်များကို ရှာဖွေနေပါသည်...", parse_mode="Markdown")
-    
-    data = fetch_data(f"competitions/{league_id}/matches")
-    
-    if not data or 'matches' not in data:
-        await update.message.reply_text(f"❌ `{league_name}` ပွဲစဉ်များ မတွေ့ပါ။", parse_mode="Markdown")
-        return
-    
-    matches = data['matches'][:10]
-    if not matches:
-        await update.message.reply_text(f"📅 `{league_name}` တွင် ပွဲစဉ်များ မရှိပါ။", parse_mode="Markdown")
-        return
-    
-    text = f"⚽ **{league_name.upper()}**\n\n"
-    for match in matches:
-        text += format_match(match) + "\n\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
+    try:
+        if not context.args:
+            await update.message.reply_text("❌ /league [လိဂ်အမည်]\nဥပမာ: /league premier league")
+            return
+        
+        league_name = ' '.join(context.args)
+        league_id = get_league_id(league_name)
+        
+        if not league_id:
+            await update.message.reply_text(f"❌ `{league_name}` လိဂ်ကို မတွေ့ပါ။", parse_mode="Markdown")
+            return
+        
+        await update.message.reply_text(f"⏳ `{league_name}` ပွဲစဉ်များကို ရှာဖွေနေပါသည်...", parse_mode="Markdown")
+        
+        data = fetch_data(f"competitions/{league_id}/matches")
+        
+        if not data or 'matches' not in data:
+            await update.message.reply_text(f"❌ `{league_name}` ပွဲစဉ်များ မတွေ့ပါ။", parse_mode="Markdown")
+            return
+        
+        matches = data['matches'][:10]
+        if not matches:
+            await update.message.reply_text(f"📅 `{league_name}` တွင် ပွဲစဉ်များ မရှိပါ။", parse_mode="Markdown")
+            return
+        
+        text = f"⚽ **{league_name.upper()}**\n\n"
+        for match in matches:
+            text += format_match(match) + "\n\n"
+        
+        await update.message.reply_text(text, parse_mode="Markdown")
+        logger.info(f"✅ League matches sent: {league_name}")
+    except Exception as e:
+        logger.exception(f"❌ Error in league handler: {e}")
+        await update.message.reply_text("❌ လိဂ်ပွဲစဉ်များ ရယူရာတွင် အမှားရှိပါသည်။")
 
 async def teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ အသင်းများစာရင်းကို ရှာဖွေနေပါသည်...")
-    
-    data = fetch_data("teams")
-    
-    if not data or 'teams' not in data:
-        await update.message.reply_text("❌ အသင်းများစာရင်း မတွေ့ပါ။")
-        return
-    
-    teams_list = data['teams'][:20]
-    text = "⚽ **အသင်းများစာရင်း**\n\n"
-    for team in teams_list:
-        text += f"• {team['name']}\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
+    try:
+        await update.message.reply_text("⏳ အသင်းများစာရင်းကို ရှာဖွေနေပါသည်...")
+        
+        data = fetch_data("teams")
+        
+        if not data or 'teams' not in data:
+            await update.message.reply_text("❌ အသင်းများစာရင်း မတွေ့ပါ။")
+            return
+        
+        teams_list = data['teams'][:20]
+        text = "⚽ **အသင်းများစာရင်း**\n\n"
+        for team in teams_list:
+            text += f"• {team['name']}\n"
+        
+        await update.message.reply_text(text, parse_mode="Markdown")
+        logger.info("✅ Teams list sent")
+    except Exception as e:
+        logger.exception(f"❌ Error in teams handler: {e}")
+        await update.message.reply_text("❌ အသင်းစာရင်း ရယူရာတွင် အမှားရှိပါသည်။")
 
 async def leagues(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ လိဂ်များစာရင်းကို ရှာဖွေနေပါသည်...")
-    
-    data = fetch_data("competitions")
-    
-    if not data or 'competitions' not in data:
-        await update.message.reply_text("❌ လိဂ်များစာရင်း မတွေ့ပါ။")
-        return
-    
-    leagues_list = data['competitions'][:20]
-    text = "⚽ **ရရှိနိုင်သော လိဂ်များ**\n\n"
-    for comp in leagues_list:
-        text += f"• {comp['name']} ({comp.get('code', 'N/A')})\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
+    try:
+        await update.message.reply_text("⏳ လိဂ်များစာရင်းကို ရှာဖွေနေပါသည်...")
+        
+        data = fetch_data("competitions")
+        
+        if not data or 'competitions' not in data:
+            await update.message.reply_text("❌ လိဂ်များစာရင်း မတွေ့ပါ။")
+            return
+        
+        leagues_list = data['competitions'][:20]
+        text = "⚽ **ရရှိနိုင်သော လိဂ်များ**\n\n"
+        for comp in leagues_list:
+            text += f"• {comp['name']} ({comp.get('code', 'N/A')})\n"
+        
+        await update.message.reply_text(text, parse_mode="Markdown")
+        logger.info("✅ Leagues list sent")
+    except Exception as e:
+        logger.exception(f"❌ Error in leagues handler: {e}")
+        await update.message.reply_text("❌ လိဂ်စာရင်း ရယူရာတွင် အမှားရှိပါသည်။")
 
 # ---------- Admin Menu ----------
 async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -285,60 +326,64 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("⛔ Admin အတွက်သာ။")
-        return
-    
-    data = query.data
-    logger.info(f"Admin callback: {data}")
-    
-    if data == "admin_today":
-        await query.edit_message_text("⏳ ယနေ့ပွဲစဉ်များကို ရှာဖွေနေပါသည်...")
-        today_date = datetime.now().strftime('%Y-%m-%d')
-        tomorrow_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-        data = fetch_data(f"matches?dateFrom={today_date}&dateTo={tomorrow_date}")
-        if not data or 'matches' not in data:
-            await query.edit_message_text("❌ ယနေ့ပွဲစဉ်များ မတွေ့ပါ။")
-            return
-        matches = data['matches'][:10]
-        if not matches:
-            await query.edit_message_text("📅 ယနေ့ပွဲစဉ်များ မရှိပါ။")
-            return
-        text = "📅 **ယနေ့ပွဲစဉ်များ**\n\n"
-        for match in matches:
-            text += format_match(match) + "\n\n"
-        await query.edit_message_text(text, parse_mode="Markdown")
+    try:
+        query = update.callback_query
+        await query.answer()
         
-    elif data == "admin_leagues":
-        await query.edit_message_text("⏳ လိဂ်များစာရင်းကို ရှာဖွေနေပါသည်...")
-        data = fetch_data("competitions")
-        if not data or 'competitions' not in data:
-            await query.edit_message_text("❌ လိဂ်များစာရင်း မတွေ့ပါ။")
+        if not is_admin(query.from_user.id):
+            await query.edit_message_text("⛔ Admin အတွက်သာ။")
             return
-        leagues_list = data['competitions'][:20]
-        text = "⚽ **ရရှိနိုင်သော လိဂ်များ**\n\n"
-        for comp in leagues_list:
-            text += f"• {comp['name']} ({comp.get('code', 'N/A')})\n"
-        await query.edit_message_text(text, parse_mode="Markdown")
         
-    elif data == "admin_history":
-        if not mongo_client:
-            await query.edit_message_text("❌ MongoDB မရှိပါ။")
-            return
-        history = list(predictions_col.find().sort("timestamp", -1).limit(10))
-        if not history:
-            await query.edit_message_text("📊 ခန့်မှန်းချက်မှတ်တမ်း မရှိသေးပါ။")
-            return
-        text = "📊 **နောက်ဆုံး ခန့်မှန်းချက် ၁၀ ခု**\n\n"
-        for i, h in enumerate(history, 1):
-            dt = h.get('timestamp', datetime.now()).strftime('%Y-%m-%d %H:%M')
-            text += f"{i}. {h.get('home_team', 'N/A')} vs {h.get('away_team', 'N/A')}\n"
-            text += f"   🏠{h.get('home_win', 0)}% 🤝{h.get('draw', 0)}% ✈️{h.get('away_win', 0)}%\n"
-            text += f"   📅 {dt}\n\n"
-        await query.edit_message_text(text, parse_mode="Markdown")
+        data = query.data
+        logger.info(f"Admin callback: {data}")
+        
+        if data == "admin_today":
+            await query.edit_message_text("⏳ ယနေ့ပွဲစဉ်များကို ရှာဖွေနေပါသည်...")
+            today_date = datetime.now().strftime('%Y-%m-%d')
+            tomorrow_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+            data = fetch_data(f"matches?dateFrom={today_date}&dateTo={tomorrow_date}")
+            if not data or 'matches' not in data:
+                await query.edit_message_text("❌ ယနေ့ပွဲစဉ်များ မတွေ့ပါ။")
+                return
+            matches = data['matches'][:10]
+            if not matches:
+                await query.edit_message_text("📅 ယနေ့ပွဲစဉ်များ မရှိပါ။")
+                return
+            text = "📅 **ယနေ့ပွဲစဉ်များ**\n\n"
+            for match in matches:
+                text += format_match(match) + "\n\n"
+            await query.edit_message_text(text, parse_mode="Markdown")
+            
+        elif data == "admin_leagues":
+            await query.edit_message_text("⏳ လိဂ်များစာရင်းကို ရှာဖွေနေပါသည်...")
+            data = fetch_data("competitions")
+            if not data or 'competitions' not in data:
+                await query.edit_message_text("❌ လိဂ်များစာရင်း မတွေ့ပါ။")
+                return
+            leagues_list = data['competitions'][:20]
+            text = "⚽ **ရရှိနိုင်သော လိဂ်များ**\n\n"
+            for comp in leagues_list:
+                text += f"• {comp['name']} ({comp.get('code', 'N/A')})\n"
+            await query.edit_message_text(text, parse_mode="Markdown")
+            
+        elif data == "admin_history":
+            if not mongo_client:
+                await query.edit_message_text("❌ MongoDB မရှိပါ။")
+                return
+            history = list(predictions_col.find().sort("timestamp", -1).limit(10))
+            if not history:
+                await query.edit_message_text("📊 ခန့်မှန်းချက်မှတ်တမ်း မရှိသေးပါ။")
+                return
+            text = "📊 **နောက်ဆုံး ခန့်မှန်းချက် ၁၀ ခု**\n\n"
+            for i, h in enumerate(history, 1):
+                dt = h.get('timestamp', datetime.now()).strftime('%Y-%m-%d %H:%M')
+                text += f"{i}. {h.get('home_team', 'N/A')} vs {h.get('away_team', 'N/A')}\n"
+                text += f"   🏠{h.get('home_win', 0)}% 🤝{h.get('draw', 0)}% ✈️{h.get('away_win', 0)}%\n"
+                text += f"   📅 {dt}\n\n"
+            await query.edit_message_text(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.exception(f"❌ Error in admin_callback: {e}")
+        await query.edit_message_text("❌ အမှားတစ်ခုဖြစ်ပွားခဲ့ပါသည်။")
 
 # ========== BUILD APPLICATION ==========
 telegram_app = Application.builder().token(TOKEN).build()
@@ -362,10 +407,9 @@ def webhook():
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
         if loop is not None:
-            # process_update ကို run ပြီး ၁၀ စက္ကန့်စောင့်မယ်
             future = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
             try:
-                future.result(timeout=10)
+                future.result(timeout=15)
                 logger.info("✅ Update processed successfully")
             except Exception as e:
                 logger.exception(f"Error processing update: {e}")
@@ -426,4 +470,3 @@ else:
             logger.exception(f"Loop error: {e}")
     
     threading.Thread(target=keep_loop, daemon=True).start()
-    

@@ -1,8 +1,9 @@
 import os
+import asyncio
 import logging
 import requests
 from datetime import datetime, timedelta
-from flask import Flask
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from pymongo import MongoClient
@@ -47,6 +48,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 if not TOKEN or not BOT_USERNAME or not FOOTBALL_API_KEY:
     logger.error("Missing required environment variables!")
@@ -386,27 +388,55 @@ telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
+# ========== WEBHOOK ROUTE ==========
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, telegram_app.bot)
+        asyncio.run(telegram_app.process_update(update))
+        logger.info("✅ Update processed successfully")
+        return "ok", 200
+    except Exception as e:
+        logger.exception(f"Webhook error: {e}")
+        return "error", 500
+
 # ========== MAIN ==========
 if __name__ == "__main__":
+    # Local testing - polling mode (main thread)
     logger.info("Starting bot in polling mode...")
     telegram_app.run_polling()
 else:
-    # Render အတွက် - Flask app ကို run ပြီး polling ကို background thread မှာ run မယ်
-    logger.info("Starting bot in polling mode on Render...")
+    # Gunicorn mode - webhook only
+    logger.info("Running in Gunicorn mode with webhook...")
+    
+    # Application ကို initialize လုပ်မယ်
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(telegram_app.initialize())
+    logger.info("✅ Application initialized")
+    
+    # Webhook သတ်မှတ်မယ်
+    if WEBHOOK_URL:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+                json={"url": WEBHOOK_URL}
+            )
+            logger.info(f"Webhook set: {response.json()}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}")
+    else:
+        logger.warning("WEBHOOK_URL not set!")
+    
+    # Keep the loop running
+    def keep_loop():
+        try:
+            loop.run_forever()
+        except Exception as e:
+            logger.exception(f"Loop error: {e}")
     
     import threading
-    import asyncio
+    threading.Thread(target=keep_loop, daemon=True).start()
     
-    def run_polling():
-        # Create new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(telegram_app.initialize())
-        loop.run_until_complete(telegram_app.start())
-        loop.run_until_complete(telegram_app.updater.start_polling())
-        loop.run_forever()
-    
-    # Start polling in background thread
-    polling_thread = threading.Thread(target=run_polling, daemon=True)
-    polling_thread.start()
-    logger.info("✅ Bot is running with polling")
+    logger.info("✅ Bot is running with webhook")

@@ -2,13 +2,11 @@ import os
 import asyncio
 import logging
 import requests
-import secrets
 from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from pymongo import MongoClient
-from bson import ObjectId
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -17,99 +15,83 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Football Prediction Bot with MongoDB is running!"
+    return "Football Prediction Bot is running!"
 
 @app.route('/health')
 def health():
     return "OK", 200
 
-# ---------- MongoDB Connection ----------
+# ---------- MongoDB ----------
 MONGO_URI = os.environ.get("MONGO_URI")
-if not MONGO_URI:
-    logger.error("MONGO_URI environment variable not set!")
-    exit(1)
+if MONGO_URI:
+    try:
+        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        mongo_client.admin.command('ping')
+        db = mongo_client["football_bot"]
+        predictions_col = db["predictions"]
+        users_col = db["users"]
+        logger.info("✅ MongoDB connected successfully")
+    except Exception as e:
+        logger.error(f"MongoDB connection failed: {e}")
+        mongo_client = None
+        predictions_col = None
+        users_col = None
+else:
+    logger.warning("MONGO_URI not set - running without database")
+    mongo_client = None
+    predictions_col = None
+    users_col = None
 
-try:
-    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    mongo_client.admin.command('ping')
-    logger.info("MongoDB connected successfully")
-except Exception as e:
-    logger.error(f"MongoDB connection failed: {e}")
-    exit(1)
-
-db = mongo_client["football_prediction_bot"]
-users_collection = db["users"]
-predictions_collection = db["predictions"]
-matches_collection = db["matches"]
-stats_collection = db["stats"]
-
-# ---------- Database Helper Functions ----------
-def add_user(user_id, username=None, first_name=None, last_name=None):
-    """User ကို Database ထဲထည့်ခြင်း"""
-    if not users_collection.find_one({"user_id": user_id}):
-        users_collection.insert_one({
+def save_prediction(home_team, away_team, home_win, draw, away_win, user_id):
+    """ခန့်မှန်းချက်ကို MongoDB မှာ သိမ်းမယ်"""
+    if predictions_col is None:
+        return
+    try:
+        predictions_col.insert_one({
+            "home_team": home_team,
+            "away_team": away_team,
+            "home_win": home_win,
+            "draw": draw,
+            "away_win": away_win,
             "user_id": user_id,
-            "username": username,
-            "first_name": first_name,
-            "last_name": last_name,
-            "first_seen": datetime.now(),
-            "last_active": datetime.now(),
-            "predictions_count": 0,
-            "is_admin": user_id in [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()]
+            "created_at": datetime.now()
         })
-        return True
-    else:
-        users_collection.update_one(
-            {"user_id": user_id},
-            {"$set": {"last_active": datetime.now(), "username": username, "first_name": first_name}}
-        )
-        return False
-
-def save_prediction(user_id, home_team, away_team, home_win, draw, away_win, result_text):
-    """ခန့်မှန်းချက်ကို Database ထဲသိမ်းခြင်း"""
-    pred_data = {
-        "user_id": user_id,
-        "home_team": home_team,
-        "away_team": away_team,
-        "home_win": home_win,
-        "draw": draw,
-        "away_win": away_win,
-        "result_text": result_text,
-        "timestamp": datetime.now()
-    }
-    result = predictions_collection.insert_one(pred_data)
-    
-    # Update user's prediction count
-    users_collection.update_one(
-        {"user_id": user_id},
-        {"$inc": {"predictions_count": 1}}
-    )
-    
-    # Update total stats
-    stats_collection.update_one(
-        {"_id": "total_predictions"},
-        {"$inc": {"count": 1}},
-        upsert=True
-    )
-    
-    return result.inserted_id
+    except Exception as e:
+        logger.error(f"Save prediction error: {e}")
 
 def get_user_stats(user_id):
-    """User တစ်ယောက်ရဲ့ ခန့်မှန်းချက်စာရင်းအင်းကိုယူခြင်း"""
-    total = predictions_collection.count_documents({"user_id": user_id})
-    recent = predictions_collection.find({"user_id": user_id}).sort("timestamp", -1).limit(5)
-    return total, list(recent)
+    """သုံးစွဲသူရဲ့ ခန့်မှန်းချက်စာရင်းအင်းကို ရယူမယ်"""
+    if predictions_col is None:
+        return None
+    try:
+        count = predictions_col.count_documents({"user_id": user_id})
+        return count
+    except:
+        return None
 
-def get_global_stats():
-    """Global စာရင်းအင်းကိုယူခြင်း"""
-    total_users = users_collection.count_documents({})
-    total_preds = stats_collection.find_one({"_id": "total_predictions"})
-    total_preds_count = total_preds["count"] if total_preds else 0
-    return total_users, total_preds_count
+def get_all_stats():
+    """စုစုပေါင်း ခန့်မှန်းချက်စာရင်းအင်း"""
+    if predictions_col is None:
+        return None
+    try:
+        total = predictions_col.count_documents({})
+        return total
+    except:
+        return None
 
-def get_all_users():
-    """User အားလုံးကိုယူခြင်း (Admin အတွက်)"""
-    return list(users_collection.find({}, {"user_id": 1, "username": 1, "first_name": 1, "predictions_count": 1}))
+def add_user(user_id, username=None):
+    """သုံးစွဲသူကို MongoDB မှာ သိမ်းမယ်"""
+    if users_col is None:
+        return
+    try:
+        if not users_col.find_one({"user_id": user_id}):
+            users_col.insert_one({
+                "user_id": user_id,
+                "username": username,
+                "first_seen": datetime.now()
+            })
+    except Exception as e:
+        logger.error(f"Add user error: {e}")
 
 # ---------- Telegram Config ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -201,11 +183,9 @@ def calculate_prediction(home_team, away_team):
 
 # ---------- Telegram Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    
-    # Add user to database
-    add_user(user_id, user.username, user.first_name, user.last_name)
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+    add_user(user_id, username)
     
     if is_admin(user_id):
         await show_admin_menu(update, context)
@@ -218,12 +198,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔹 /league [လိဂ်အမည်] - လိဂ်တစ်ခုရဲ့ ပွဲစဉ်များ\n"
             "🔹 /teams - အသင်းများစာရင်း\n"
             "🔹 /leagues - ရရှိနိုင်သော လိဂ်များ\n"
-            "🔹 /mystats - ကျွန်ုပ်၏ ခန့်မှန်းချက်စာရင်းအင်း",
+            "🔹 /mystats - သင်၏ ခန့်မှန်းချက်စာရင်းအင်း",
             parse_mode="Markdown"
         )
 
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(
@@ -234,22 +213,22 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     home_team = ' '.join(args[:-1])
     away_team = args[-1]
+    user_id = update.effective_user.id
     
     msg = await update.message.reply_text(f"⏳ `{home_team}` vs `{away_team}` ကို ခန့်မှန်းနေပါသည်...", parse_mode="Markdown")
     
     prediction = calculate_prediction(home_team, away_team)
     
-    # Save prediction to database
-    result_text = f"🏠 {home_team} အနိုင် {prediction['home_win']}%\n🤝 သရေ {prediction['draw']}%\n✈️ {away_team} အနိုင် {prediction['away_win']}%\n📊 {prediction['result']}"
-    save_prediction(user_id, home_team, away_team, prediction['home_win'], prediction['draw'], prediction['away_win'], result_text)
+    # Save to MongoDB
+    save_prediction(home_team, away_team, prediction['home_win'], prediction['draw'], prediction['away_win'], user_id)
     
-    output = f"⚽ **{home_team}** vs **{away_team}**\n\n"
-    output += f"🏠 **{home_team}** အနိုင်ရနိုင်ခြေ: {prediction['home_win']}%\n"
-    output += f"🤝 သရေကျနိုင်ခြေ: {prediction['draw']}%\n"
-    output += f"✈️ **{away_team}** အနိုင်ရနိုင်ခြေ: {prediction['away_win']}%\n\n"
-    output += f"📊 {prediction['result']}"
+    result_text = f"⚽ **{home_team}** vs **{away_team}**\n\n"
+    result_text += f"🏠 **{home_team}** အနိုင်ရနိုင်ခြေ: {prediction['home_win']}%\n"
+    result_text += f"🤝 သရေကျနိုင်ခြေ: {prediction['draw']}%\n"
+    result_text += f"✈️ **{away_team}** အနိုင်ရနိုင်ခြေ: {prediction['away_win']}%\n\n"
+    result_text += f"📊 {prediction['result']}"
     
-    await msg.edit_text(output, parse_mode="Markdown")
+    await msg.edit_text(result_text, parse_mode="Markdown")
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ ယနေ့ပွဲစဉ်များကို ရှာဖွေနေပါသည်...")
@@ -340,70 +319,36 @@ async def leagues(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# ========== MY STATS ==========
 async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    total, recent = get_user_stats(user_id)
+    count = get_user_stats(user_id)
     
-    text = f"📊 **ကျွန်ုပ်၏ ခန့်မှန်းချက်စာရင်းအင်း**\n\n"
-    text += f"📝 စုစုပေါင်း ခန့်မှန်းချက်များ: {total}\n\n"
-    
-    if recent:
-        text += "🕐 **မကြာသေးမီက ခန့်မှန်းချက်များ**\n"
-        for pred in recent:
-            text += f"• {pred['home_team']} vs {pred['away_team']}\n"
-            text += f"  {pred['result_text'][:50]}...\n\n"
-    else:
-        text += "❌ ခန့်မှန်းချက် မရှိသေးပါ။"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-# ========== ADMIN COMMANDS ==========
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ Admin အတွက်သာ။")
+    if count is None:
+        await update.message.reply_text("📊 သင်၏ ခန့်မှန်းချက်စာရင်းအင်းကို ရယူနိုင်ခြင်း မရှိပါ။ MongoDB မချိတ်ဆက်ထားလို့ဖြစ်နိုင်ပါသည်။")
         return
     
-    total_users, total_preds = get_global_stats()
-    all_users = get_all_users()
-    
-    text = f"📊 **Admin စာရင်းအင်း**\n\n"
-    text += f"👥 စုစုပေါင်း သုံးစွဲသူများ: {total_users}\n"
-    text += f"📝 စုစုပေါင်း ခန့်မှန်းချက်များ: {total_preds}\n\n"
-    text += "👤 **သုံးစွဲသူများစာရင်း**\n"
-    for user in all_users[:10]:
-        text += f"• {user.get('first_name', 'N/A')} (@{user.get('username', 'N/A')}) - {user.get('predictions_count', 0)} ကြိမ်\n"
-    
-    if len(all_users) > 10:
-        text += f"\n... နှင့် နောက်ထပ် {len(all_users) - 10} ဦး"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ Admin အတွက်သာ။")
-        return
-    
-    all_users = get_all_users()
-    text = "👤 **သုံးစွဲသူအားလုံး**\n\n"
-    for user in all_users:
-        text += f"• {user.get('first_name', 'N/A')} (@{user.get('username', 'N/A')}) - ID: {user['user_id']} - {user.get('predictions_count', 0)} ကြိမ်\n"
-        if len(text) > 4000:
-            text += "... စာရင်းရှည်နေပါသည်။"
-            break
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(
+        f"📊 **သင်၏ ခန့်မှန်းချက်စာရင်းအင်း**\n\n"
+        f"🔹 စုစုပေါင်း ခန့်မှန်းချက်: {count} ကြိမ်\n\n"
+        f"ဆက်လက်ခန့်မှန်းချင်ပါက `/predict` ကိုသုံးပါ။",
+        parse_mode="Markdown"
+    )
 
 # ---------- Admin Menu ----------
 async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    total_preds = get_all_stats()
+    total_users = users_col.count_documents({}) if users_col else 0
+    
     keyboard = [
         [InlineKeyboardButton("⚽ ယနေ့ပွဲစဉ်များ", callback_data="admin_today")],
         [InlineKeyboardButton("🏆 လိဂ်များ", callback_data="admin_leagues")],
-        [InlineKeyboardButton("📊 စာရင်းအင်း", callback_data="admin_stats")],
-        [InlineKeyboardButton("👤 သုံးစွဲသူများ", callback_data="admin_users")],
+        [InlineKeyboardButton("📊 စုစုပေါင်းစာရင်းအင်း", callback_data="admin_stats")],
     ]
     await update.message.reply_text(
-        "🤖 **Admin Panel**\n\nအောက်ပါခလုတ်များမှ ရွေးချယ်ပါ။",
+        f"🤖 **Admin Panel**\n\n"
+        f"👥 အသုံးပြုသူဦးရေ: {total_users}\n"
+        f"📊 စုစုပေါင်းခန့်မှန်းချက်: {total_preds if total_preds else 0}\n\n"
+        f"အောက်ပါခလုတ်များမှ ရွေးချယ်ပါ။",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -422,9 +367,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_leagues":
         await leagues(update, context)
     elif data == "admin_stats":
-        await admin_stats(update, context)
-    elif data == "admin_users":
-        await admin_users(update, context)
+        total_preds = get_all_stats()
+        total_users = users_col.count_documents({}) if users_col else 0
+        await query.edit_message_text(
+            f"📊 **စုစုပေါင်းစာရင်းအင်း**\n\n"
+            f"👥 အသုံးပြုသူဦးရေ: {total_users}\n"
+            f"📊 စုစုပေါင်းခန့်မှန်းချက်: {total_preds if total_preds else 0}",
+            parse_mode="Markdown"
+        )
 
 # ---------- Build Application ----------
 telegram_app = Application.builder().token(TOKEN).build()
@@ -436,8 +386,6 @@ telegram_app.add_handler(CommandHandler("league", league))
 telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
 telegram_app.add_handler(CommandHandler("mystats", mystats))
-telegram_app.add_handler(CommandHandler("admin_stats", admin_stats))
-telegram_app.add_handler(CommandHandler("admin_users", admin_users))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
 # ---------- Webhook Route ----------

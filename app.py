@@ -398,24 +398,17 @@ telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
-# ========== GLOBAL LOOP ==========
-loop = None
-
-# ========== WEBHOOK ROUTE ==========
+# ========== WEBHOOK ROUTE (ပြင်ဆင်ပြီး) ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    global loop
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
         
-        if loop is not None:
-            asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
-            logger.info("✅ Update queued for processing")
-            return "ok", 200
-        else:
-            logger.error("❌ Loop is None! Cannot process update.")
-            return "error", 500
+        # asyncio.run() ကို တိုက်ရိုက်သုံးပြီး update ကို process လုပ်မယ်
+        asyncio.run(telegram_app.process_update(update))
+        logger.info("✅ Update processed successfully")
+        return "ok", 200
     except Exception as e:
         logger.exception(f"Webhook error: {e}")
         return "error", 500
@@ -427,12 +420,13 @@ if __name__ == "__main__":
 else:
     logger.info("Running in Gunicorn mode with webhook...")
     
-    # Initialize loop
+    # Application ကို initialize လုပ်မယ်
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(telegram_app.initialize())
     logger.info("✅ Application initialized")
     
+    # Webhook သတ်မှတ်မယ်
     if WEBHOOK_URL:
         try:
             response = requests.post(
@@ -445,6 +439,7 @@ else:
     else:
         logger.warning("WEBHOOK_URL not set!")
     
+    # Loop ကို background မှာ run ထားမယ်
     def keep_loop():
         try:
             loop.run_forever()

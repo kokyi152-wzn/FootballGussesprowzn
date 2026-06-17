@@ -138,7 +138,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         logger.info(f"✅ /start from user: {user_id}")
         
-        # Admin ID စစ်ဆေးပါ
         logger.info(f"Admin IDs: {ADMIN_IDS}")
         logger.info(f"Is user admin? {is_admin(user_id)}")
         
@@ -399,14 +398,25 @@ telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
+# ========== GLOBAL LOOP ==========
+loop = None
+
 # ========== WEBHOOK ROUTE ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    global loop
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        asyncio.run(telegram_app.process_update(update))
-        return "ok", 200
+        
+        if loop is not None:
+            # Use the existing loop to process the update
+            asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+            logger.info("✅ Update queued for processing")
+            return "ok", 200
+        else:
+            logger.error("❌ Loop is None! Cannot process update.")
+            return "error", 500
     except Exception as e:
         logger.exception(f"Webhook error: {e}")
         return "error", 500
@@ -418,6 +428,7 @@ if __name__ == "__main__":
 else:
     logger.info("Running in Gunicorn mode with webhook...")
     
+    global loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(telegram_app.initialize())
@@ -443,3 +454,5 @@ else:
     
     import threading
     threading.Thread(target=keep_loop, daemon=True).start()
+    
+    logger.info("✅ Bot is running with webhook")

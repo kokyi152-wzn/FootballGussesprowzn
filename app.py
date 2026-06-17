@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 import requests
-import threading
 from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -49,6 +48,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 if not TOKEN or not BOT_USERNAME or not FOOTBALL_API_KEY:
     logger.error("Missing required environment variables!")
@@ -388,47 +388,56 @@ telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
-# ============================================================
-# ====================== POLLING MODE =========================
-# ============================================================
-def run_bot_polling():
-    """Run the bot in polling mode in a separate thread."""
-    # Create a new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    # Initialize the application
-    loop.run_until_complete(telegram_app.initialize())
-    
-    # Start polling
-    logger.info("Starting bot in polling mode...")
-    try:
-        telegram_app.run_polling()
-    except Exception as e:
-        logger.exception(f"Polling error: {e}")
-
-# ============================================================
-# ====================== FLASK ROUTES ========================
-# ============================================================
+# ========== WEBHOOK ROUTE ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # Webhook is disabled. We are using polling.
-    return "Polling mode is active. Webhook is disabled.", 200
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, telegram_app.bot)
+        # Webhook မှာ asyncio.run() ကို တိုက်ရိုက်သုံးမယ်
+        asyncio.run(telegram_app.process_update(update))
+        logger.info("✅ Update processed successfully")
+        return "ok", 200
+    except Exception as e:
+        logger.exception(f"Webhook error: {e}")
+        return "error", 500
 
-# ============================================================
-# ====================== MAIN ================================
-# ============================================================
+# ========== MAIN ==========
 if __name__ == "__main__":
-    # When running locally via python app.py, start polling in main thread.
-    logger.info("Running in local mode. Starting polling...")
+    # Local testing - polling mode (main thread မှာ run မယ်)
+    logger.info("Starting bot in polling mode (local)...")
     telegram_app.run_polling()
 else:
-    # When running on Render with Gunicorn, start polling in a background thread.
-    # This avoids event loop issues and keeps Flask responsive.
-    logger.info("Running on Render with Gunicorn. Starting polling in background thread...")
+    # Gunicorn mode - webhook only (polling ကို လုံးဝမသုံးဘူး)
+    logger.info("Running in Gunicorn mode with webhook...")
     
-    # Start the polling in a daemon thread so it doesn't block Gunicorn.
-    polling_thread = threading.Thread(target=run_bot_polling, daemon=True)
-    polling_thread.start()
+    # Application ကို initialize လုပ်မယ်
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(telegram_app.initialize())
+    logger.info("✅ Application initialized")
     
-    logger.info("✅ Bot polling thread started. Flask is ready.")
+    # Webhook သတ်မှတ်မယ်
+    if WEBHOOK_URL:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+                json={"url": WEBHOOK_URL}
+            )
+            logger.info(f"Webhook set: {response.json()}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}")
+    else:
+        logger.warning("WEBHOOK_URL not set!")
+    
+    # Loop ကို background မှာ run ထားမယ် (webhook အတွက်)
+    def keep_loop():
+        try:
+            loop.run_forever()
+        except Exception as e:
+            logger.exception(f"Loop error: {e}")
+    
+    import threading
+    threading.Thread(target=keep_loop, daemon=True).start()
+    
+    logger.info("✅ Bot is running with webhook (polling disabled)")

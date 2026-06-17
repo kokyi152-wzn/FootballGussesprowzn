@@ -25,16 +25,23 @@ def health():
 MONGO_URI = os.environ.get("MONGO_URI")
 if MONGO_URI:
     try:
-        mongo_client = MongoClient(MONGO_URI, tlsAllowInvalidCertificates=True, serverSelectionTimeoutMS=5000)
+        # ✅ အဓိက ပြင်ဆင်ချက် - tls=True နဲ့ tlsAllowInvalidCertificates=True ထည့်ထားတယ်
+        mongo_client = MongoClient(
+            MONGO_URI,
+            tls=True,
+            tlsAllowInvalidCertificates=True,
+            serverSelectionTimeoutMS=10000
+        )
         mongo_client.admin.command('ping')
         db = mongo_client["football_bot"]
         predictions_col = db["predictions"]
         users_col = db["users"]
-        logger.info("✅ MongoDB connected")
+        logger.info("✅ MongoDB connected successfully")
     except Exception as e:
         logger.warning(f"MongoDB connection failed: {e}")
         mongo_client = None
 else:
+    logger.warning("MONGO_URI not set!")
     mongo_client = None
 
 # ---------- Telegram Config ----------
@@ -355,10 +362,8 @@ def webhook():
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        # Use run_coroutine_threadsafe with the global loop
         if loop is not None:
             future = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
-            # Wait for it to complete to catch any errors
             try:
                 future.result(timeout=5)
             except Exception as e:
@@ -378,7 +383,6 @@ def setup_webhook_and_run():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # Initialize and set webhook
     loop.run_until_complete(telegram_app.initialize())
     if WEBHOOK_URL:
         loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
@@ -386,7 +390,6 @@ def setup_webhook_and_run():
     else:
         logger.warning("WEBHOOK_URL not set!")
     
-    # Start Flask in a separate thread
     import threading
     def run_flask():
         port = int(os.environ.get("PORT", 5000))
@@ -394,7 +397,6 @@ def setup_webhook_and_run():
     
     threading.Thread(target=run_flask, daemon=True).start()
     
-    # Keep the loop running
     try:
         loop.run_forever()
     except KeyboardInterrupt:
@@ -404,7 +406,7 @@ def setup_webhook_and_run():
 if __name__ == "__main__":
     setup_webhook_and_run()
 else:
-    # Gunicorn mode - setup webhook and run
+    # Gunicorn mode
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     logger.info("Running in Gunicorn mode...")
@@ -415,7 +417,6 @@ else:
     else:
         logger.warning("WEBHOOK_URL not set!")
     
-    # Keep the loop running in background
     import threading
     def keep_loop():
         try:

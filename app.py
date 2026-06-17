@@ -3,7 +3,7 @@ import asyncio
 import logging
 import requests
 from datetime import datetime, timedelta
-from flask import Flask
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 
@@ -24,14 +24,24 @@ def health():
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
-
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+
+if not TOKEN or not BOT_USERNAME or not FOOTBALL_API_KEY:
+    logger.error("Missing required environment variables!")
+    exit(1)
+
+if not WEBHOOK_URL:
+    logger.error("WEBHOOK_URL not set!")
+    exit(1)
+
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {'X-Auth-Token': FOOTBALL_API_KEY}
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
+# ---------- Helper Functions ----------
 def fetch_data(endpoint):
     try:
         url = f"{BASE_URL}/{endpoint}"
@@ -47,13 +57,9 @@ def fetch_data(endpoint):
 
 def get_league_id(league_name):
     leagues = {
-        'premier league': 2021,
-        'laliga': 2014,
-        'bundesliga': 2002,
-        'serie a': 2019,
-        'ligue 1': 2015,
-        'champions league': 2001,
-        'europa league': 2000,
+        'premier league': 2021, 'laliga': 2014, 'bundesliga': 2002,
+        'serie a': 2019, 'ligue 1': 2015, 'champions league': 2001,
+        'europa league': 2000, 'eredivisie': 2003, 'primeira liga': 2017
     }
     return leagues.get(league_name.lower())
 
@@ -94,6 +100,7 @@ def calculate_prediction(home_team, away_team):
     draw = random.randint(20, 40)
     away_win = 100 - home_win - draw
     
+    result = ""
     if home_win >= 70:
         result = f"🔥 **{home_team}** အနိုင်ရနိုင်ခြေ မြင့်မားနေပါသည်။"
     elif away_win >= 70:
@@ -105,7 +112,7 @@ def calculate_prediction(home_team, away_team):
     
     return {'home_win': home_win, 'draw': draw, 'away_win': away_win, 'result': result}
 
-# ---------- Commands ----------
+# ---------- Telegram Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_admin(user_id):
@@ -113,22 +120,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(
             "⚽ **ဘောလုံးခန့်မှန်းချက် Bot မှ ကြိုဆိုပါတယ်။**\n\n"
-            "ကျွန်ုပ်၏ Command များ:\n"
+            "Command များ:\n"
             "🔹 /predict [အသင်း၁] [အသင်း၂] - ပွဲစဉ်ခန့်မှန်းချက်\n"
             "🔹 /today - ယနေ့ပွဲစဉ်များ\n"
             "🔹 /league [လိဂ်အမည်] - လိဂ်တစ်ခုရဲ့ ပွဲစဉ်များ\n"
             "🔹 /teams - အသင်းများစာရင်း\n"
-            "🔹 /leagues - ရရှိနိုင်သော လိဂ်များ\n"
-            "🔹 /stats - ခန့်မှန်းချက်စာရင်းအင်း\n\n"
-            "လိဂ်အမည်များ:\n"
-            "`premier league`, `laliga`, `bundesliga`, `serie a`, `ligue 1`, `champions league`, `europa league`",
+            "🔹 /leagues - ရရှိနိုင်သော လိဂ်များ",
             parse_mode="Markdown"
         )
 
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text("❌ အသင်းနှစ်သင်းစလုံးရဲ့ နာမည်ကို ထည့်ပေးပါ။\nဥပမာ - `/predict Arsenal Chelsea`")
+        await update.message.reply_text(
+            "❌ အသင်းနှစ်သင်းစလုံးရဲ့ နာမည်ကို ထည့်ပေးပါ။\n"
+            "ဥပမာ - `/predict Arsenal Chelsea`"
+        )
         return
     
     home_team = ' '.join(args[:-1])
@@ -158,17 +165,14 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ ယနေ့ပွဲစဉ်များ မတွေ့ပါ။")
         return
     
-    matches = data['matches']
+    matches = data['matches'][:10]
     if not matches:
         await update.message.reply_text("📅 ယနေ့ပွဲစဉ်များ မရှိပါ။")
         return
     
     text = "📅 **ယနေ့ပွဲစဉ်များ**\n\n"
-    for match in matches[:10]:
+    for match in matches:
         text += format_match(match) + "\n\n"
-    
-    if len(matches) > 10:
-        text += f"... နှင့် နောက်ထပ် {len(matches) - 10} ပွဲ"
     
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -176,9 +180,7 @@ async def league(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "❌ လိဂ်အမည် ထည့်ပေးပါ။\n"
-            "ဥပမာ - `/league premier league`\n\n"
-            "ရရှိနိုင်သော လိဂ်များ:\n"
-            "`premier league`, `laliga`, `bundesliga`, `serie a`, `ligue 1`, `champions league`"
+            "ဥပမာ - `/league premier league`"
         )
         return
     
@@ -222,9 +224,6 @@ async def teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for team in teams_list:
         text += f"• {team['name']}\n"
     
-    if len(data['teams']) > 20:
-        text += f"\n... နှင့် နောက်ထပ် {len(data['teams']) - 20} သင်း"
-    
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def leagues(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -243,19 +242,11 @@ async def leagues(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📊 **ခန့်မှန်းချက် စာရင်းအင်း**\n\n"
-        "Bot ကို စတင်အသုံးပြုဆဲဖြစ်သောကြောင့် စာရင်းအင်းများ စုဆောင်းနေပါသည်။\n\n"
-        "ခန့်မှန်းချက် တိကျမှုကို ပွဲစဉ်များပြီးဆုံးချိန်တွင် အပ်ဒိတ်လုပ်ပါမည်။"
-    )
-
 # ---------- Admin Menu ----------
 async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("⚽ ယနေ့ပွဲစဉ်များ", callback_data="admin_today")],
         [InlineKeyboardButton("🏆 လိဂ်များ", callback_data="admin_leagues")],
-        [InlineKeyboardButton("📊 စာရင်းအင်း", callback_data="admin_stats")],
     ]
     await update.message.reply_text(
         "🤖 **Admin Panel**\n\nအောက်ပါခလုတ်များမှ ရွေးချယ်ပါ။",
@@ -276,24 +267,46 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await today(update, context)
     elif data == "admin_leagues":
         await leagues(update, context)
-    elif data == "admin_stats":
-        await stats(update, context)
 
-# ---------- Main ----------
-def main():
-    application = Application.builder().token(TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("predict", predict))
-    application.add_handler(CommandHandler("today", today))
-    application.add_handler(CommandHandler("league", league))
-    application.add_handler(CommandHandler("teams", teams))
-    application.add_handler(CommandHandler("leagues", leagues))
-    application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
-    
-    logger.info("Bot started polling...")
-    application.run_polling()
+# ---------- Build Application ----------
+telegram_app = Application.builder().token(TOKEN).build()
+
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("predict", predict))
+telegram_app.add_handler(CommandHandler("today", today))
+telegram_app.add_handler(CommandHandler("league", league))
+telegram_app.add_handler(CommandHandler("teams", teams))
+telegram_app.add_handler(CommandHandler("leagues", leagues))
+telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
+
+# ---------- Webhook ----------
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, telegram_app.bot)
+        asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+        return "ok", 200
+    except Exception as e:
+        logger.exception("Webhook error")
+        return "error", 500
+
+def start_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
+
+async def set_webhook():
+    await telegram_app.bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook set to {WEBHOOK_URL}")
 
 if __name__ == "__main__":
-    main()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(telegram_app.initialize())
+    loop.run_until_complete(set_webhook())
+    import threading
+    threading.Thread(target=start_flask, daemon=True).start()
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        loop.run_until_complete(telegram_app.shutdown())

@@ -388,34 +388,61 @@ telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
-# ========== WEBHOOK ROUTE (simple and reliable) ==========
+# ========== WEBHOOK ROUTE ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        
-        # Process update in background without waiting
-        import threading
-        def process():
-            try:
-                asyncio.run(telegram_app.process_update(update))
-                logger.info("✅ Update processed successfully")
-            except Exception as e:
-                logger.exception(f"Background processing error: {e}")
-        
-        threading.Thread(target=process, daemon=True).start()
+        # asyncio.run() ကို တိုက်ရိုက်သုံးပြီး update ကို process လုပ်မယ်
+        asyncio.run(telegram_app.process_update(update))
+        logger.info("✅ Update processed successfully")
         return "ok", 200
     except Exception as e:
         logger.exception(f"Webhook error: {e}")
         return "error", 500
 
 # ========== MAIN ==========
-if __name__ == "__main__":
-    # Local development - polling mode
-    logger.info("Starting bot in polling mode...")
+def main():
+    """Render မှာ Gunicorn နဲ့ run တဲ့အခါ ဒီ function ကို ခေါ်မယ်"""
+    logger.info("Running in Gunicorn mode with webhook...")
+    
+    # Application ကို initialize လုပ်မယ်
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(telegram_app.initialize())
+    logger.info("✅ Application initialized")
+    
+    # Webhook သတ်မှတ်မယ်
+    if WEBHOOK_URL:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+                json={"url": WEBHOOK_URL}
+            )
+            logger.info(f"Webhook set: {response.json()}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}")
+    else:
+        logger.warning("WEBHOOK_URL not set!")
+    
+    # Loop ကို background မှာ run ထားမယ်
+    def keep_loop():
+        try:
+            loop.run_forever()
+        except Exception as e:
+            logger.exception(f"Loop error: {e}")
+    
+    import threading
+    threading.Thread(target=keep_loop, daemon=True).start()
+    
+    logger.info("✅ Bot is running with webhook")
+
+# Gunicorn က import လုပ်တဲ့အခါ ဒီ block ကို run မယ်
+if not os.environ.get("RENDER"):
+    # Local testing - polling mode
+    logger.info("Starting bot in polling mode (local)...")
     telegram_app.run_polling()
 else:
-    # Production - polling mode (more reliable than webhook on Render)
-    logger.info("Starting bot in polling mode on Render...")
-    telegram_app.run_polling()
+    # Render production - webhook mode
+    main()

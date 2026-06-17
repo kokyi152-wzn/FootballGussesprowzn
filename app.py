@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from pymongo import MongoClient
 
-# ---------- Flask app ကို ပထမဆုံး သတ်မှတ်ပါ ----------
+# ---------- Flask app ----------
 app = Flask(__name__)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -362,8 +362,14 @@ def webhook():
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
         if loop is not None:
-            # Async process ကို background မှာ run ပြီး timeout မဖြစ်အောင် ချက်ချင်း return
-            asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+            # process_update ကို run ပြီး ၁၀ စက္ကန့်စောင့်မယ်
+            future = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+            try:
+                future.result(timeout=10)
+                logger.info("✅ Update processed successfully")
+            except Exception as e:
+                logger.exception(f"Error processing update: {e}")
+                return "error", 500
             return "ok", 200
         else:
             logger.error("Loop is None!")
@@ -420,3 +426,4 @@ else:
             logger.exception(f"Loop error: {e}")
     
     threading.Thread(target=keep_loop, daemon=True).start()
+    

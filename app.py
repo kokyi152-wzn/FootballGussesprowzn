@@ -31,11 +31,12 @@ if MONGO_URI:
         db = mongo_client["football_bot"]
         predictions_col = db["predictions"]
         users_col = db["users"]
-        logger.info("MongoDB connected")
+        logger.info("✅ MongoDB connected successfully")
     except Exception as e:
         logger.warning(f"MongoDB connection failed: {e}")
         mongo_client = None
 else:
+    logger.warning("MONGO_URI not set - running without database")
     mongo_client = None
 
 # ---------- Telegram Config ----------
@@ -125,10 +126,11 @@ def calculate_prediction(home_team, away_team):
     
     return {'home_win': home_win, 'draw': draw, 'away_win': away_win, 'result': result}
 
-# ---------- Telegram Command Handlers ----------
+# ========== TELEGRAM HANDLERS ==========
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    logger.info(f"Start command from {user_id}")
+    logger.info(f"✅ /start from user: {user_id}")
     
     if mongo_client:
         users_col.update_one({"user_id": user_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
@@ -139,18 +141,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "⚽ **ဘောလုံးခန့်မှန်းချက် Bot**\n\n"
             "Command များ:\n"
-            "🔹 /predict [အသင်း၁] [အသင်း၂]\n"
+            "🔹 /predict [အသင်း၁] [အသင်း၂] - ခန့်မှန်းချက်\n"
             "🔹 /today - ယနေ့ပွဲစဉ်များ\n"
-            "🔹 /league [လိဂ်အမည်]\n"
-            "🔹 /teams - အသင်းများ\n"
-            "🔹 /leagues - လိဂ်များ",
+            "🔹 /league [လိဂ်အမည်] - လိဂ်ပွဲစဉ်များ\n"
+            "🔹 /teams - အသင်းများစာရင်း\n"
+            "🔹 /leagues - လိဂ်များစာရင်း",
             parse_mode="Markdown"
         )
 
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text("❌ /predict [အသင်း၁] [အသင်း၂]")
+        await update.message.reply_text("❌ /predict [အသင်း၁] [အသင်း၂]\nဥပမာ: /predict Arsenal Chelsea")
         return
     
     home_team = ' '.join(args[:-1])
@@ -203,7 +205,7 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def league(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ /league [လိဂ်အမည်]\nဥပမာ - `/league premier league`")
+        await update.message.reply_text("❌ /league [လိဂ်အမည်]\nဥပမာ: /league premier league")
         return
     
     league_name = ' '.join(context.args)
@@ -268,7 +270,7 @@ async def leagues(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("⚽ ယနေ့ပွဲစဉ်များ", callback_data="admin_today")],
-        [InlineKeyboardButton("🏆 လိဂ်များ", callback_data="admin_leagues")],
+        [InlineKeyboardButton("🏆 လိဂ်များစာရင်း", callback_data="admin_leagues")],
         [InlineKeyboardButton("📊 ခန့်မှန်းချက်မှတ်တမ်း", callback_data="admin_history")],
     ]
     await update.message.reply_text(
@@ -350,8 +352,6 @@ def run_flask():
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 if __name__ == "__main__":
-    # Flask in background thread
     threading.Thread(target=run_flask, daemon=True).start()
-    # Start bot polling
-    logger.info("Bot started polling...")
+    logger.info("🚀 Bot started polling...")
     application.run_polling()

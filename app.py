@@ -391,7 +391,7 @@ def webhook():
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        # Process update directly without asyncio
+        # asyncio.run() ကို သုံးပြီး process_update ကို run မယ်
         asyncio.run(telegram_app.process_update(update))
         return "ok", 200
     except Exception as e:
@@ -400,21 +400,40 @@ def webhook():
 
 # ========== MAIN ==========
 if __name__ == "__main__":
-    # Use polling mode (no webhook needed)
+    # Local testing - polling mode
     logger.info("Starting bot in polling mode...")
-    telegram_app.run_polling(allowed_updates=Update.ALL_TYPES)
+    telegram_app.run_polling()
 else:
-    # Gunicorn mode - use webhook
+    # Gunicorn mode - webhook mode
     logger.info("Running in Gunicorn mode with webhook...")
-    # Set webhook
-    import requests
-    webhook_url = f"https://footballgussesprowzn.onrender.com/webhook"
-    response = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-        json={"url": webhook_url}
-    )
-    logger.info(f"Webhook set: {response.json()}")
     
-    # Start Flask (Gunicorn will handle it)
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # **အဓိက - Application ကို initialize လုပ်ပါ**
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(telegram_app.initialize())
+    logger.info("✅ Application initialized")
+    
+    # Webhook သတ်မှတ်ပါ
+    if WEBHOOK_URL:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+                json={"url": WEBHOOK_URL}
+            )
+            logger.info(f"Webhook set: {response.json()}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}")
+    else:
+        logger.warning("WEBHOOK_URL not set!")
+    
+    # Keep the loop running
+    def keep_loop():
+        try:
+            loop.run_forever()
+        except Exception as e:
+            logger.exception(f"Loop error: {e}")
+    
+    import threading
+    threading.Thread(target=keep_loop, daemon=True).start()
+    
+    # Flask is run by Gunicorn, so we don't need to start it here

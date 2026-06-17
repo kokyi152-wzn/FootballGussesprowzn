@@ -17,7 +17,7 @@ app = Flask(__name__)
 MONGO_URI = os.environ.get("MONGO_URI")
 if MONGO_URI:
     try:
-        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        mongo_client = MongoClient(MONGO_URI, tlsAllowInvalidCertificates=True, serverSelectionTimeoutMS=5000)
         mongo_client.admin.command('ping')
         db = mongo_client["football_bot"]
         predictions_col = db["predictions"]
@@ -128,6 +128,7 @@ def calculate_prediction(home_team, away_team):
 
 # ---------- Telegram Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Start command received from user {update.effective_user.id}")
     user_id = update.effective_user.id
     if mongo_client:
         users_col.update_one({"user_id": user_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
@@ -162,7 +163,6 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     prediction = calculate_prediction(home_team, away_team)
     
-    # Save to MongoDB if available
     if mongo_client:
         predictions_col.insert_one({
             "home_team": home_team,
@@ -307,59 +307,55 @@ telegram_app.add_handler(CommandHandler("teams", teams))
 telegram_app.add_handler(CommandHandler("leagues", leagues))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="admin_"))
 
+# ---------- Global Event Loop ----------
+loop = None
+
 # ---------- Webhook Route ----------
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    global loop
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        # Use global loop for async processing
+        # Schedule the update processing on the global event loop
         asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
         return "ok", 200
     except Exception as e:
         logger.exception("Webhook error")
         return "error", 500
 
-# ---------- Setup Webhook at Startup ----------
-def setup_webhook():
-    try:
-        asyncio.run_coroutine_threadsafe(telegram_app.initialize(), loop)
-        asyncio.run_coroutine_threadsafe(telegram_app.bot.set_webhook(WEBHOOK_URL), loop)
-        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
-    except Exception as e:
-        logger.error(f"Webhook setup failed: {e}")
-
-# ---------- Flask Thread ----------
-def start_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, use_reloader=False, debug=False)
-
-# ---------- Main ----------
-if __name__ == "__main__":
-    # Create global event loop
+# ---------- Setup Webhook and Start ----------
+def setup_and_run():
+    global loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # Setup webhook
+    # Initialize and set webhook
     loop.run_until_complete(telegram_app.initialize())
     loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
     logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
     
-    # Start Flask in background thread
+    # Start Flask in a separate thread
     import threading
-    threading.Thread(target=start_flask, daemon=True).start()
+    def run_flask():
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port, use_reloader=False, debug=False)
     
-    # Keep loop running
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    # Keep the event loop running
     try:
         loop.run_forever()
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         loop.run_until_complete(telegram_app.shutdown())
+
+if __name__ == "__main__":
+    setup_and_run()
 else:
     # Gunicorn mode - setup webhook and keep loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
     logger.info("Running in Gunicorn mode - setting up webhook...")
     loop.run_until_complete(telegram_app.initialize())
     loop.run_until_complete(telegram_app.bot.set_webhook(WEBHOOK_URL))
